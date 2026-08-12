@@ -58,3 +58,7 @@ The project focuses on a tactile cut-and-reveal loop: the player slices into a h
 - Expo slug: `photo-slice-native`
 - TypeScript-only codebase
 - CI validates type checking on push and pull request
+
+## Changelog
+
+Project-level updates are tracked in [CHANGELOG.md](CHANGELOG.md).
