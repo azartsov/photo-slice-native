@@ -1,46 +1,60 @@
 # Photo Slice Native
 
-`Photo Slice Native` is an Expo + React Native arcade prototype inspired by Xonix, where the playfield is built from a random photo on the device.
+`Photo Slice Native` is an Android-first Expo / React Native arcade prototype inspired by Xonix, where each level is built from a random photo on the device.
 
-## Current state
+The project focuses on a tactile cut-and-reveal loop: the player slices into a hidden image, avoids moving hazards, and gradually opens the photo by capturing safe areas.
 
-- Mobile-first single-screen gameplay prototype
-- Demo backdrop fallback when photo access is unavailable
-- Random level photos loaded from the media library
-- Five difficulty levels: Sunny, Cloudy, Stormy, Blizzard, Apocalypse
-- Hazard counts per difficulty: 3, 4, 5, 6, 8
-- A moving cursor that travels along the hidden area perimeter
-- 90-degree cut turns driven by taps
-- Per-difficulty opened-photo counters
-- Local sound effects for reveal and hazard clear events
-- EAS profiles for preview APK and production AAB builds
+## Current Feature Set
 
-## Development
+- mobile-first single-screen gameplay prototype
+- random level photos loaded from the media library
+- demo backdrop fallback when photo access is unavailable
+- five difficulty levels: `Sunny`, `Cloudy`, `Stormy`, `Blizzard`, `Apocalypse`
+- hazard counts per difficulty: `3`, `4`, `5`, `6`, `8`
+- moving cursor that travels along the hidden area perimeter
+- tap-driven `90` degree turns while a cut is active
+- per-difficulty counters for completed photo openings
+- local sound effects for reveal and hazard clear events
+- EAS build profiles for preview APK and production AAB outputs
 
-- `npm run start` starts the Expo dev server
-- `npm run android` builds and runs the Android app locally
-- `npm run ios` builds and runs the iOS app locally
-- `npm run web` starts the web preview
-- `npm run prebuild` regenerates native projects
-- `npm run typecheck` runs `tsc --noEmit`
+## Tech Stack
 
-## EAS builds
+- Expo
+- React Native
+- TypeScript
+- local asset-based audio
+- GitHub Actions CI for type checking
 
-- `npm run apk` creates an Android preview build through EAS
-- `npm run aab` creates a production Android App Bundle through EAS
+## Main Scripts
 
-## Gameplay rules
+- `npm install` — install dependencies
+- `npm run start` — start the Expo dev server
+- `npm run android` — build and run the Android app locally
+- `npm run ios` — build and run the iOS app locally
+- `npm run web` — launch the web preview
+- `npm run prebuild` — regenerate native Expo projects
+- `npm run typecheck` — run `tsc --noEmit`
+- `npm run apk` — create an Android preview build through EAS
+- `npm run aab` — create a production Android App Bundle through EAS
 
-- Tap the field to send the cursor into the hidden area.
-- While a cut is active, each next tap turns it by 90 degrees toward the tap side.
-- If a hazard touches the cut before it closes, the attempt fails.
-- When a cut reaches the boundary, the smaller captured area is revealed.
-- Hazards inside the revealed area are removed.
-- When all hazards are cleared, the photo is fully opened and the next run can continue on a new random photo.
+## Gameplay Loop
 
-## Project notes
+- tap the field to send the cursor into the hidden area
+- while a cut is active, each next tap turns it by `90` degrees toward the tap side
+- if a hazard touches the cut before it closes, the attempt fails
+- when a cut reaches the boundary, the smaller captured area is revealed
+- hazards inside the revealed area are removed
+- when all hazards are cleared, the photo is fully opened and the run continues on a new random image
+
+## Local Run
+
+1. `cd /Users/valeryazartsov/photo-slice-native`
+2. `npm install`
+3. `npm run android`
+
+## Project Notes
 
 - Android package: `com.valeryazartsov.photoslicenative`
-- Expo project slug: `photo-slice-native`
-- TypeScript-only codebase with local asset-based audio
-- CI currently validates TypeScript on push and pull request
+- Expo slug: `photo-slice-native`
+- TypeScript-only codebase
+- CI validates type checking on push and pull request
