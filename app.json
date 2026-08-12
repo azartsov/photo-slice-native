@@ -1,30 +1,66 @@
 {
   "expo": {
-    "name": "photo-slice-native",
+    "name": "Random Photo Slice",
     "slug": "photo-slice-native",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Photo Slice использует ваши фотографии как игровые уровни.",
+          "cameraPermission": "Photo Slice использует камеру, чтобы сразу превратить новый кадр в уровень.",
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Photo Slice случайно выбирает фото из вашей галереи для игрового поля.",
+          "savePhotosPermission": "Photo Slice может сохранять снимки, если вы захотите использовать их как уровни.",
+          "granularPermissions": [
+            "photo"
+          ]
+        }
+      ],
+      "expo-audio"
+    ],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#08111f"
     },
     "ios": {
+      "bundleIdentifier": "com.valeryazartsov.photoslicenative",
       "supportsTablet": true
     },
     "android": {
+      "package": "com.valeryazartsov.photoslicenative",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#08111f"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
+      "versionCode": 12
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4b9e9bd2-9ff4-4d3e-8f13-4cb5732e7ef7"
+      }
     }
   }
 }
