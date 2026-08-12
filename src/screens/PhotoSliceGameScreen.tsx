@@ -544,7 +544,9 @@ export function PhotoSliceGameScreen() {
     }
   }
 
-  async function handleRandomPhoto(startAttempt = false) {
+  async function handleRandomPhoto(startAttempt = false, nextDifficulty = difficulty) {
+    const nextTheme = DIFFICULTY_THEMES[nextDifficulty];
+
     setLoadingPhoto(true);
     try {
       const candidates = await collectRandomPhotoCandidates(sourceEntries, copy);
@@ -561,7 +563,7 @@ export function PhotoSliceGameScreen() {
           height: null,
         });
         setBursts([]);
-        setGameState(createInitialGameState(difficultyTheme.hazardCount));
+        setGameState(createInitialGameState(nextTheme.hazardCount));
         setAttemptStarted(startAttempt);
         return;
       }
@@ -575,7 +577,7 @@ export function PhotoSliceGameScreen() {
         height: imageSize.height,
       });
       setBursts([]);
-      setGameState(createInitialGameState(difficultyTheme.hazardCount));
+      setGameState(createInitialGameState(nextTheme.hazardCount));
       setAttemptStarted(startAttempt);
     } catch (error) {
       setPhoto({
@@ -585,7 +587,7 @@ export function PhotoSliceGameScreen() {
         height: null,
       });
       setBursts([]);
-      setGameState(createInitialGameState(difficultyTheme.hazardCount));
+      setGameState(createInitialGameState(nextTheme.hazardCount));
       setAttemptStarted(startAttempt);
 
       if (error instanceof Error && error.message === "permission-denied") {
@@ -675,20 +677,26 @@ export function PhotoSliceGameScreen() {
     pendingSoundRef.current = effect;
   }
 
-  function handleCycleDifficulty() {
+  async function handleCycleDifficulty() {
     if (!canChangeDifficulty) {
       return;
     }
 
-    setDifficulty((current) => {
-      const currentIndex = DIFFICULTY_ORDER.indexOf(current);
-      const nextDifficulty = DIFFICULTY_ORDER[(currentIndex + 1) % DIFFICULTY_ORDER.length];
-      setGameState(createInitialGameState(DIFFICULTY_THEMES[nextDifficulty].hazardCount));
-      setBursts([]);
-      setAttemptStarted(false);
-      setWonOverlayDismissed(false);
-      return nextDifficulty;
-    });
+    const currentIndex = DIFFICULTY_ORDER.indexOf(difficulty);
+    const nextDifficulty = DIFFICULTY_ORDER[(currentIndex + 1) % DIFFICULTY_ORDER.length];
+    const shouldLoadNewPhoto = gameState.status === "won";
+
+    setDifficulty(nextDifficulty);
+    setBursts([]);
+    setAttemptStarted(false);
+    setWonOverlayDismissed(false);
+
+    if (shouldLoadNewPhoto) {
+      await handleRandomPhoto(false, nextDifficulty);
+      return;
+    }
+
+    setGameState(createInitialGameState(DIFFICULTY_THEMES[nextDifficulty].hazardCount));
   }
 
   function handleGameEvent(event: PhotoSliceGameEvent) {
@@ -914,7 +922,7 @@ export function PhotoSliceGameScreen() {
               textColor={difficultyTheme.foreground}
               disabled={!canChangeDifficulty}
               stretch
-              onPress={handleCycleDifficulty}
+              onPress={() => void handleCycleDifficulty()}
             />
           </View>
         </View>

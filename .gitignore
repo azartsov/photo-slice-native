@@ -9,6 +9,9 @@ dist/
 web-build/
 expo-env.d.ts
 
+# local assistant settings
+.claude/
+
 # Native
 .kotlin/
 *.orig.*

@@ -131,11 +131,11 @@ export function stepGame(state: PhotoSliceGameState, deltaSeconds: number): Phot
   };
   const trail = getCutTrail(activeCut);
 
-  if (movedHazards.some((hazard) => doesHazardHitTrail(hazard, trail))) {
-    return applyCutFailure(state, movedHazards);
-  }
-
   if (!reachedBoundary) {
+    if (movedHazards.some((hazard) => doesHazardHitTrail(hazard, trail))) {
+      return applyCutFailure(state, movedHazards);
+    }
+
     return {
       ...state,
       hazards: movedHazards,
@@ -152,6 +152,11 @@ export function stepGame(state: PhotoSliceGameState, deltaSeconds: number): Phot
   const largeArea = smallArea === split.first ? split.second : split.first;
   const destroyedHazards = movedHazards.filter((hazard) => containsPoint(smallArea, hazard.position));
   const remainingHazards = movedHazards.filter((hazard) => !containsPoint(smallArea, hazard.position));
+
+  if (remainingHazards.some((hazard) => doesHazardHitTrail(hazard, trail))) {
+    return applyCutFailure(state, movedHazards);
+  }
+
   const removalEvent =
     destroyedHazards.length > 0
       ? {
@@ -435,7 +440,7 @@ function getBoundaryHit(polygon: Vector2[], origin: Vector2, direction: Directio
         continue;
       }
       const midpoint = add(origin, scale(directionVector, candidateDistance / 2));
-      if (!containsPoint(polygon, midpoint)) {
+      if (!containsPointStrictlyInside(polygon, midpoint)) {
         continue;
       }
       bestDistance = candidateDistance;
@@ -452,7 +457,7 @@ function getBoundaryHit(polygon: Vector2[], origin: Vector2, direction: Directio
         continue;
       }
       const midpoint = add(origin, scale(directionVector, candidateDistance / 2));
-      if (!containsPoint(polygon, midpoint)) {
+      if (!containsPointStrictlyInside(polygon, midpoint)) {
         continue;
       }
       bestDistance = candidateDistance;

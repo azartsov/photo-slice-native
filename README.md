@@ -1,42 +1,46 @@
 # Photo Slice Native
 
-Expo + React Native vertical slice игры по мотивам Xonix, где игровым полем становится фотография из камеры или галереи.
+`Photo Slice Native` is an Expo + React Native arcade prototype inspired by Xonix, where the playfield is built from a random photo on the device.
 
-В текущем состоянии есть:
-- mobile-first экран с одной игровой ареной
-- demo backdrop, если на устройстве нет фото или не даны разрешения
-- случайный выбор фото из медиатеки через `expo-media-library`
-- ручной выбор фото и съёмка кадра через `expo-image-picker`
-- пять уровней сложности: Sunny, Cloudy, Stormy, Blizzard и Apocalypse
-- курсор, который движется по периметру скрытой области
-- разрез с поворотами на 90° в сторону тапа
-- раскрытие меньшей из двух частей после успешного замыкания линии
-- шурикены-опасности, которые двигаются внутри скрытой области и уничтожаются, если оказываются в открывшейся части
-- EAS build profiles для `apk` и `aab`
+## Current state
 
-## Scripts
+- Mobile-first single-screen gameplay prototype
+- Demo backdrop fallback when photo access is unavailable
+- Random level photos loaded from the media library
+- Five difficulty levels: Sunny, Cloudy, Stormy, Blizzard, Apocalypse
+- Hazard counts per difficulty: 3, 4, 5, 6, 8
+- A moving cursor that travels along the hidden area perimeter
+- 90-degree cut turns driven by taps
+- Per-difficulty opened-photo counters
+- Local sound effects for reveal and hazard clear events
+- EAS profiles for preview APK and production AAB builds
 
-- `npm run start` — Expo dev server
-- `npm run android` — Android native run через Expo
-- `npm run ios` — iOS native run через Expo
-- `npm run web` — web preview
-- `npm run prebuild` — сгенерировать native projects
-- `npm run typecheck` — проверить TypeScript
-- `npm run apk` — собрать Android APK через EAS
-- `npm run aab` — собрать production Android App Bundle через EAS
+## Development
 
-## Gameplay notes
+- `npm run start` starts the Expo dev server
+- `npm run android` builds and runs the Android app locally
+- `npm run ios` builds and runs the iOS app locally
+- `npm run web` starts the web preview
+- `npm run prebuild` regenerates native projects
+- `npm run typecheck` runs `tsc --noEmit`
 
-- Тап по полю запускает курсор внутрь скрытой области.
-- Пока идёт разрез, новые тапы поворачивают линию под прямым углом в сторону тапа.
-- Если шурикен касается линии до завершения, попытка отменяется.
-- Когда все шурикены уничтожены, фото открывается полностью.
-- Сложность меняет фон под игровым полем и число шурикенов: 3, 4, 5, 6 и 8.
-- Счетчик открытых фото ведется отдельно для каждого уровня сложности.
+## EAS builds
 
-## Next steps
+- `npm run apk` creates an Android preview build through EAS
+- `npm run aab` creates a production Android App Bundle through EAS
 
-- добавить сохранение прогресса и уровней
-- заменить procedural shuriken art на полноценные ассеты
-- расширить физику столкновений и поведение шурикенов около сложных полигонов
-- добавить звук, хаптики и экран мета-прогресса
+## Gameplay rules
+
+- Tap the field to send the cursor into the hidden area.
+- While a cut is active, each next tap turns it by 90 degrees toward the tap side.
+- If a hazard touches the cut before it closes, the attempt fails.
+- When a cut reaches the boundary, the smaller captured area is revealed.
+- Hazards inside the revealed area are removed.
+- When all hazards are cleared, the photo is fully opened and the next run can continue on a new random photo.
+
+## Project notes
+
+- Android package: `com.valeryazartsov.photoslicenative`
+- Expo project slug: `photo-slice-native`
+- TypeScript-only codebase with local asset-based audio
+- CI currently validates TypeScript on push and pull request
