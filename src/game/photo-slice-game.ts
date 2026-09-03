@@ -5,8 +5,11 @@ export type Vector2 = {
 
 export type Direction = "up" | "down" | "left" | "right";
 
+export type HazardKind = "normal" | "red" | "green";
+
 export type Hazard = {
   id: number;
+  kind: HazardKind;
   position: Vector2;
   velocity: Vector2;
   radius: number;
@@ -42,7 +45,7 @@ const EPSILON = 0.001;
 const BOARD_SIZE = 1000;
 const CUTTER_SPEED = 280;
 const PERIMETER_SPEED = 220;
-const HAZARD_BASE_SPEED = 124;
+const HAZARD_BASE_SPEED = 162;
 const HAZARD_RADIUS = 24;
 const INITIAL_LIVES = 3;
 const INITIAL_HAZARD_COUNT = 5;
@@ -67,11 +70,11 @@ const DIRECTION_VECTORS: Record<Direction, Vector2> = {
   right: { x: 1, y: 0 },
 };
 
-export function createInitialGameState(initialHazardCount = INITIAL_HAZARD_COUNT): PhotoSliceGameState {
+export function createInitialGameState(initialHazardCount = INITIAL_HAZARD_COUNT, hazardKinds?: HazardKind[]): PhotoSliceGameState {
   return {
     hiddenPolygon: INITIAL_POLYGON,
     revealedPolygons: [],
-    hazards: createHazards(initialHazardCount, INITIAL_POLYGON),
+    hazards: createHazards(initialHazardCount, INITIAL_POLYGON, hazardKinds),
     activeCut: null,
     perimeterProgress: 0,
     lives: INITIAL_LIVES,
@@ -132,8 +135,9 @@ export function stepGame(state: PhotoSliceGameState, deltaSeconds: number): Phot
   const trail = getCutTrail(activeCut);
 
   if (!reachedBoundary) {
-    if (movedHazards.some((hazard) => doesHazardHitTrail(hazard, trail))) {
-      return applyCutFailure(state, movedHazards);
+    const collidingHazard = movedHazards.find((hazard) => doesHazardHitTrail(hazard, trail));
+    if (collidingHazard) {
+      return applyCutFailure(state, movedHazards, collidingHazard);
     }
 
     return {
@@ -153,8 +157,9 @@ export function stepGame(state: PhotoSliceGameState, deltaSeconds: number): Phot
   const destroyedHazards = movedHazards.filter((hazard) => containsPoint(smallArea, hazard.position));
   const remainingHazards = movedHazards.filter((hazard) => !containsPoint(smallArea, hazard.position));
 
-  if (remainingHazards.some((hazard) => doesHazardHitTrail(hazard, trail))) {
-    return applyCutFailure(state, movedHazards);
+  const collidingHazard = remainingHazards.find((hazard) => doesHazardHitTrail(hazard, trail));
+  if (collidingHazard) {
+    return applyCutFailure(state, movedHazards, collidingHazard);
   }
 
   const removalEvent =
@@ -262,12 +267,17 @@ export function getCutTrail(activeCut: ActiveCut): Vector2[] {
   return [...activeCut.points, activeCut.head];
 }
 
-function applyCutFailure(state: PhotoSliceGameState, hazards: Hazard[]): PhotoSliceGameState {
+function applyCutFailure(state: PhotoSliceGameState, hazards: Hazard[], collidingHazard?: Hazard): PhotoSliceGameState {
   const nextLives = state.lives - 1;
   const failureSource = state.activeCut?.head ?? getCursorPosition(state);
+  const splitHazards = collidingHazard ? splitHazard(collidingHazard, hazards) : [];
+  const nextHazards =
+    collidingHazard && collidingHazard.kind !== "normal"
+      ? [...hazards.filter((hazard) => hazard.id !== collidingHazard.id), ...splitHazards]
+      : hazards;
   return {
     ...state,
-    hazards,
+    hazards: nextHazards,
     activeCut: null,
     lives: nextLives,
     status: nextLives <= 0 ? "lost" : "playing",
@@ -280,7 +290,7 @@ function applyCutFailure(state: PhotoSliceGameState, hazards: Hazard[]): PhotoSl
   };
 }
 
-function createHazards(count: number, polygon: Vector2[]): Hazard[] {
+function createHazards(count: number, polygon: Vector2[], hazardKinds?: HazardKind[]): Hazard[] {
   return Array.from({ length: count }, (_, index) => {
     const position = samplePointInsidePolygon(polygon);
     const angle = Math.random() * Math.PI * 2;
@@ -288,6 +298,7 @@ function createHazards(count: number, polygon: Vector2[]): Hazard[] {
 
     return {
       id: index + 1,
+      kind: hazardKinds?.[index] ?? "normal",
       position,
       velocity: {
         x: Math.cos(angle) * speed,
@@ -296,6 +307,37 @@ function createHazards(count: number, polygon: Vector2[]): Hazard[] {
       radius: HAZARD_RADIUS,
       angle: Math.random() * 360,
       spin: (Math.random() > 0.5 ? 1 : -1) * (90 + Math.random() * 160),
+    };
+  });
+}
+
+function splitHazard(hazard: Hazard, hazards: Hazard[]): Hazard[] {
+  if (hazard.kind === "normal") {
+    return [];
+  }
+
+  const childKind: HazardKind = hazard.kind === "green" ? "red" : "normal";
+  const nextId = Math.max(0, ...hazards.map((item) => item.id)) + 1;
+  const speed = Math.hypot(hazard.velocity.x, hazard.velocity.y) * 1.12;
+  const baseAngle = Math.atan2(hazard.velocity.y, hazard.velocity.x);
+
+  return [-1, 1].map((direction, index) => {
+    const angle = baseAngle + direction * (Math.PI / 3);
+    const offset = hazard.radius * 0.42;
+    return {
+      id: nextId + index,
+      kind: childKind,
+      position: {
+        x: hazard.position.x + Math.cos(angle) * offset,
+        y: hazard.position.y + Math.sin(angle) * offset,
+      },
+      velocity: {
+        x: Math.cos(angle) * speed,
+        y: Math.sin(angle) * speed,
+      },
+      radius: hazard.radius * 0.84,
+      angle: hazard.angle + direction * 28,
+      spin: hazard.spin * direction,
     };
   });
 }

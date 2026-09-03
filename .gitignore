@@ -28,6 +28,10 @@ expo-env.d.ts
 npm-debug.*
 yarn-debug.*
 yarn-error.*
+.size-metrics/
+.tmp/
+.tmp-gradle/
+.tmp-java/
 
 # macOS
 .DS_Store

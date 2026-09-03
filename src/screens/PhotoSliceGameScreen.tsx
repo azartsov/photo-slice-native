@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 
 import { Directory, File, Paths } from "expo-file-system";
 import { setAudioModeAsync, setIsAudioActiveAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
@@ -28,6 +28,7 @@ import {
   getCursorPosition,
   getCutTrail,
   getOpenPercent,
+  HazardKind,
   PhotoSliceGameEvent,
   PhotoSliceGameState,
   polygonToSvgPoints,
@@ -83,17 +84,65 @@ type DifficultyTheme = {
 };
 
 type OpenedPhotosByDifficulty = Record<DifficultyLevel, number>;
+type AverageLevelDurationsMs = Record<DifficultyLevel, number>;
+
+type LevelRewardState = {
+  totalCoins: number;
+  brightCoins: number;
+  startedAtMs: number | null;
+  baselineDurationMs: number;
+};
+
+type CoinVisualState = {
+  index: number;
+  eclipseProgress: number;
+};
+
+type CoinRewardFlight = {
+  id: number;
+  count: number;
+  source: Vector2;
+  target: Vector2;
+  finalTotalCoins: number;
+  openedPhotosByDifficulty: OpenedPhotosByDifficulty;
+  averageLevelDurationsMs: AverageLevelDurationsMs;
+};
+
+type CoinSpendFlight = {
+  id: number;
+  count: number;
+  source: Vector2;
+  target: Vector2;
+  finalTotalCoins: number;
+};
 
 type NoticeState = {
   title: string;
   body: string;
 } | null;
 
+type SoundEffect = "paper-rustle" | "hazard-clear" | "life-lost";
+
+type AppStats = {
+  openedPhotosCount?: number;
+  openedPhotosByDifficulty?: Partial<OpenedPhotosByDifficulty>;
+  musicMuted?: boolean;
+  totalCoins?: number;
+  averageLevelDurationsMs?: Partial<AverageLevelDurationsMs>;
+};
+
 const MAX_FRAME_DELTA_SECONDS = 0.1;
+const MIN_LEVEL_DURATION_MS = 9000;
+const MAX_LEVEL_DURATION_MS = 270000;
+const COIN_FADE_DURATION_MULTIPLIER = 3;
+const COIN_TOKEN_SIZE = 28;
+const LIFE_COST_COINS = 2;
 const CAMERA_ALBUM_PATTERN = /(camera|камера|dcim)/i;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".gif", ".bmp"]);
 const APP_STORAGE_DIRECTORY = new Directory(Paths.document, "random-photo-slice");
 const APP_STATS_FILE = new File(APP_STORAGE_DIRECTORY, "stats.json");
+const INTRO_MUSIC_TRACK = require("../../assets/audio/intro.m4a");
+const GAME_MUSIC_TRACKS = [require("../../assets/audio/1.m4a"), require("../../assets/audio/2.m4a")] as const;
 const DEFAULT_SOURCE_ENTRIES: SourceEntry[] = [
   { id: "camera", kind: "camera" },
 ];
@@ -103,6 +152,13 @@ const EMPTY_OPENED_PHOTOS_BY_DIFFICULTY: OpenedPhotosByDifficulty = {
   stormy: 0,
   blizzard: 0,
   apocalypse: 0,
+};
+const DEFAULT_LEVEL_DURATION_MS: AverageLevelDurationsMs = {
+  sunny: 18000,
+  cloudy: 26000,
+  stormy: 34000,
+  blizzard: 44000,
+  apocalypse: 56000,
 };
 const DIFFICULTY_ORDER: DifficultyLevel[] = ["sunny", "cloudy", "stormy", "blizzard", "apocalypse"];
 const DIFFICULTY_THEMES: Record<DifficultyLevel, DifficultyTheme> = {
@@ -127,26 +183,91 @@ const DIFFICULTY_THEMES: Record<DifficultyLevel, DifficultyTheme> = {
     foreground: "#eff6ff",
   },
   apocalypse: {
-    hazardCount: 8,
+    hazardCount: 7,
     accent: "#020617",
     foreground: "#f8fafc",
   },
 };
+
+function waitForMilliseconds(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, milliseconds);
+  });
+}
+
+async function waitForAudioPlayerLoaded(player: { isLoaded: boolean }, timeoutMilliseconds = 2000) {
+  const startedAt = Date.now();
+
+  while (!player.isLoaded) {
+    if (Date.now() - startedAt >= timeoutMilliseconds) {
+      throw new Error("audio player load timeout");
+    }
+
+    await waitForMilliseconds(25);
+  }
+}
+
+async function primeAudioPlayer(player: {
+  isLoaded: boolean;
+  volume: number;
+  play(): void;
+  pause(): void;
+  seekTo(seconds: number): Promise<void>;
+}, durationSeconds?: number) {
+  await waitForAudioPlayerLoaded(player);
+  const originalVolume = player.volume;
+  const warmUpMilliseconds = Math.max(140, Math.ceil((durationSeconds ?? 0.14) * 1000) + 30);
+
+  player.volume = Math.min(originalVolume, 0.01);
+  player.play();
+  await waitForMilliseconds(warmUpMilliseconds);
+  player.pause();
+  await waitForMilliseconds(20);
+  player.volume = originalVolume;
+  await player.seekTo(0);
+}
+
+async function restartSoundEffectPlayer(player: {
+  muted: boolean;
+  playing: boolean;
+  currentTime: number;
+  pause(): void;
+  play(): void;
+  seekTo(seconds: number): Promise<void>;
+}) {
+  player.muted = false;
+
+  const shouldSeekToStart = player.playing || player.currentTime > 0;
+
+  if (player.playing) {
+    player.pause();
+  }
+
+  if (shouldSeekToStart) {
+    await player.seekTo(0);
+  }
+
+  player.play();
+}
 const UI_TEXT = {
   ru: {
     title: "Random Photo Slice",
+    level: "Уровень",
+    totalCoins: "Монеты",
+    rewardCoins: "Награда",
+    coinsWon: "Монеты в копилку",
     opened: "Открыто",
     hazards: "Враги",
     lives: "Жизни",
     wonTitle: "Фото полностью раскрыто",
-    wonBody: "Все шурикены уничтожены. Теперь можно продолжить играть на новом случайном фото и при желании сменить сложность.",
+    wonBody: "Все шурикены уничтожены. Оставшиеся яркие монеты ушли в копилку, а следующий уровень уже станет сложнее.",
     lostTitle: "Фото не удалось открыть",
-    lostBody: "Все жизни закончились. При желании можно сменить уровень сложности, а затем нажать Играть, чтобы начать новую попытку на этом же фото.",
+    lostBody: "Все жизни закончились. Монеты этого уровня сгорели. Нажмите Играть, чтобы заново пройти тот же уровень.",
     playButton: "Играть",
-    levelButton: "Сложность",
-    levelReadyHint: "Доступно только до начала попытки",
+    nextLevelHint: "Следующий по кругу",
+    currentRewardHint: "Тускнеют по ходу уровня",
     readyTitle: "Уровень готов",
-    readyBody: "Нажмите Играть, чтобы начать попытку на текущем фото. Сейчас можно сменить уровень сложности.",
+    readyBody: "Нажмите Играть, чтобы начать попытку. Монеты этого уровня будут постепенно гаснуть, пока идет прохождение.",
     ok: "ОК",
     loading: "Загрузка...",
     needPhotosTitle: "Нужен доступ к фото",
@@ -163,8 +284,10 @@ const UI_TEXT = {
       "4. Если шурикен касается линии, попытка отменяется и тратится жизнь.",
       "5. Когда линия упирается в границу, открывается меньшая область.",
       "6. Если шурикен оказался в открывшейся части, он уничтожается.",
-      "7. Уровни сложности: Солнечный, Облачный, Штормовой, Ураганный и Апокалипсис. На них 3, 4, 5, 6 и 8 шурикенов.",
-      "8. Счетчик открытых фото ведется отдельно для каждого уровня сложности и переключается вместе с ним.",
+      "7. Уровни идут по кругу: Солнечный, Облачный, Штормовой, Ураганный и Апокалипсис.",
+      "8. На уровнях выдается от 1 до 5 монет. Чем дольше идет прохождение, тем больше монет темнеет.",
+      "9. После победы в копилку уходят только те монеты, которые не успели потемнеть.",
+      "10. Во время попытки кнопка + в разделе Жизни тратит 2 монеты из копилки и добавляет одну жизнь. Она доступна, когда в копилке есть хотя бы 2 монеты.",
     ],
     close: "Закрыть",
     settingsTitle: "Настройки",
@@ -195,18 +318,22 @@ const UI_TEXT = {
   },
   en: {
     title: "Random Photo Slice",
+    level: "Level",
+    totalCoins: "Coins",
+    rewardCoins: "Reward",
+    coinsWon: "Banked coins",
     opened: "Opened",
     hazards: "Enemies",
     lives: "Lives",
     wonTitle: "Photo fully revealed",
-    wonBody: "All shurikens are gone. You can continue playing on a new random photo and change the difficulty now.",
+    wonBody: "All shurikens are gone. The bright coins were banked and the next level is already tougher.",
     lostTitle: "Photo could not be revealed",
-    lostBody: "No lives left. If you want, you can change the difficulty, then press Play to start a new run on the same photo.",
+    lostBody: "No lives left. This level's coins are gone. Press Play to retry the same level.",
     playButton: "Play",
-    levelButton: "Level",
-    levelReadyHint: "Available only before a run starts",
+    nextLevelHint: "Next in loop",
+    currentRewardHint: "Dims during the run",
     readyTitle: "Level ready",
-    readyBody: "Press Play to start the run on the current photo. You can also change the difficulty now.",
+    readyBody: "Press Play to start the run. This level's coins will dim over time while you play.",
     ok: "OK",
     loading: "Loading...",
     needPhotosTitle: "Photo access required",
@@ -223,8 +350,10 @@ const UI_TEXT = {
       "4. If a shuriken touches the line, the attempt is canceled and you lose a life.",
       "5. When the line reaches the border, the smaller area is revealed.",
       "6. Any shuriken inside the revealed area is destroyed.",
-      "7. Difficulty levels are Sunny, Cloudy, Stormy, Blizzard, and Apocalypse with 3, 4, 5, 6, and 8 shurikens.",
-      "8. The opened photos counter is tracked separately for each difficulty level and changes when you switch levels.",
+      "7. Levels loop automatically through Sunny, Cloudy, Stormy, Blizzard, and Apocalypse.",
+      "8. Each level gives 1 to 5 coins. The longer the run takes, the more coins fade out.",
+      "9. When you win, only the coins that stayed bright are added to your bank.",
+      "10. During a run, the + button in Lives spends 2 banked coins to add one life. It is available when the bank has at least 2 coins.",
     ],
     close: "Close",
     settingsTitle: "Settings",
@@ -257,8 +386,8 @@ const UI_TEXT = {
 
 export function PhotoSliceGameScreen() {
   const dimensions = useWindowDimensions();
-  const [difficulty, setDifficulty] = useState<DifficultyLevel>("stormy");
-  const [gameState, setGameState] = useState<PhotoSliceGameState>(() => createInitialGameState(DIFFICULTY_THEMES.stormy.hazardCount));
+  const [difficulty, setDifficulty] = useState<DifficultyLevel>("sunny");
+  const [gameState, setGameState] = useState<PhotoSliceGameState>(() => createGameStateForLevel("sunny", 1));
   const [language, setLanguage] = useState<Language>("ru");
   const [sourceEntries, setSourceEntries] = useState<SourceEntry[]>(DEFAULT_SOURCE_ENTRIES);
   const [photo, setPhoto] = useState<PhotoState>({
@@ -274,13 +403,28 @@ export function PhotoSliceGameScreen() {
   const [helpVisible, setHelpVisible] = useState(false);
   const [settingsVisible, setSettingsVisible] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
+  const [musicMuted, setMusicMuted] = useState(false);
+  const [musicPreferenceLoaded, setMusicPreferenceLoaded] = useState(false);
+  const [audioSessionReady, setAudioSessionReady] = useState(false);
+  const [audioReady, setAudioReady] = useState(false);
   const [bursts, setBursts] = useState<SparkBurst[]>([]);
+  const [levelNumber, setLevelNumber] = useState(1);
+  const [totalCoins, setTotalCoins] = useState(0);
+  const [lastWonCoins, setLastWonCoins] = useState(0);
+  const [coinRewardFlight, setCoinRewardFlight] = useState<CoinRewardFlight | null>(null);
+  const [coinSpendFlight, setCoinSpendFlight] = useState<CoinSpendFlight | null>(null);
+  const [rewardClockMs, setRewardClockMs] = useState(() => Date.now());
+  const [averageLevelDurationsMs, setAverageLevelDurationsMs] = useState<AverageLevelDurationsMs>(DEFAULT_LEVEL_DURATION_MS);
+  const [levelReward, setLevelReward] = useState<LevelRewardState>(() => createLevelRewardState("sunny", DEFAULT_LEVEL_DURATION_MS));
   const [openedPhotosByDifficulty, setOpenedPhotosByDifficulty] = useState<OpenedPhotosByDifficulty>(EMPTY_OPENED_PHOTOS_BY_DIFFICULTY);
   const [openedLayout, setOpenedLayout] = useState<LayoutBox | null>(null);
   const [boardLayout, setBoardLayout] = useState<LayoutBox | null>(null);
   const [hazardsLayout, setHazardsLayout] = useState<LayoutBox | null>(null);
   const [livesLayout, setLivesLayout] = useState<LayoutBox | null>(null);
   const boardShellRef = useRef<View | null>(null);
+  const rewardCardRef = useRef<View | null>(null);
+  const totalCoinsBadgeRef = useRef<View | null>(null);
+  const livesCardRef = useRef<View | null>(null);
   const lastFrameRef = useRef<number | null>(null);
   const attemptedInitialPhotoRef = useRef(false);
   const eventNonceRef = useRef(0);
@@ -289,51 +433,112 @@ export function PhotoSliceGameScreen() {
   const previousStatusRef = useRef(gameState.status);
   const previousOpenPercentRef = useRef<number | null>(null);
   const previousOpenedPhotosCountRef = useRef<number | null>(null);
-  const pendingSoundRef = useRef<"paper-rustle" | "hazard-clear" | null>(null);
+  const pendingSoundQueueRef = useRef<SoundEffect[]>([]);
+  const soundReplayTasksRef = useRef<Record<SoundEffect, Promise<void>>>({
+    "paper-rustle": Promise.resolve(),
+    "hazard-clear": Promise.resolve(),
+    "life-lost": Promise.resolve(),
+  });
   const audioPrimedRef = useRef(false);
-  const paperRustlePlayer = useAudioPlayer(require("../../assets/sfx/paper-rustle.wav"), { keepAudioSessionActive: true });
-  const hazardClearPlayer = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { keepAudioSessionActive: true });
+  const currentHazardPlayerIndexRef = useRef(0);
+  const currentLifeLostPlayerIndexRef = useRef(0);
+  const currentGameTrackIndexRef = useRef(0);
+  const paperRustlePlayer = useAudioPlayer(require("../../assets/sfx/paper-rustle.wav"), { downloadFirst: true, keepAudioSessionActive: true });
+  const hazardClearPlayerA = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
+  const hazardClearPlayerB = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
+  const lifeLostPlayerA = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
+  const lifeLostPlayerB = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
+  const introMusicPlayer = useAudioPlayer(INTRO_MUSIC_TRACK, { downloadFirst: true, keepAudioSessionActive: true });
+  const gameMusicPlayer = useAudioPlayer(GAME_MUSIC_TRACKS[0], { downloadFirst: true, keepAudioSessionActive: true });
   const paperRustleStatus = useAudioPlayerStatus(paperRustlePlayer);
-  const hazardClearStatus = useAudioPlayerStatus(hazardClearPlayer);
+  const hazardClearStatusA = useAudioPlayerStatus(hazardClearPlayerA);
+  const hazardClearStatusB = useAudioPlayerStatus(hazardClearPlayerB);
+  const lifeLostStatusA = useAudioPlayerStatus(lifeLostPlayerA);
+  const lifeLostStatusB = useAudioPlayerStatus(lifeLostPlayerB);
+  const introMusicStatus = useAudioPlayerStatus(introMusicPlayer);
+  const gameMusicStatus = useAudioPlayerStatus(gameMusicPlayer);
   const openedScale = useRef(new Animated.Value(1)).current;
   const hazardsScale = useRef(new Animated.Value(1)).current;
   const livesScale = useRef(new Animated.Value(1)).current;
+  const totalCoinsScale = useRef(new Animated.Value(1)).current;
   const boardSizePx = useMemo(() => Math.max(260, Math.min(dimensions.width - 56, dimensions.height * 0.56)), [dimensions.height, dimensions.width]);
   const difficultyTheme = DIFFICULTY_THEMES[difficulty];
 
   useEffect(() => {
-    paperRustlePlayer.volume = 0.24;
-    hazardClearPlayer.volume = 0.5;
-  }, [hazardClearPlayer, paperRustlePlayer]);
+    paperRustlePlayer.muted = false;
+    paperRustlePlayer.volume = 0.72;
+    hazardClearPlayerA.muted = false;
+    hazardClearPlayerA.volume = 0.5;
+    hazardClearPlayerB.muted = false;
+    hazardClearPlayerB.volume = 0.5;
+    lifeLostPlayerA.muted = false;
+    lifeLostPlayerA.volume = 0.74;
+    lifeLostPlayerB.muted = false;
+    lifeLostPlayerB.volume = 0.74;
+    introMusicPlayer.volume = 0.62;
+    introMusicPlayer.loop = true;
+    gameMusicPlayer.volume = 0.48;
+    gameMusicPlayer.loop = false;
+  }, [gameMusicPlayer, hazardClearPlayerA, hazardClearPlayerB, introMusicPlayer, lifeLostPlayerA, lifeLostPlayerB, paperRustlePlayer]);
 
   useEffect(() => {
-    if (audioPrimedRef.current || !paperRustleStatus.isLoaded || !hazardClearStatus.isLoaded) {
+    if (
+      audioPrimedRef.current ||
+      !audioSessionReady ||
+      !paperRustleStatus.isLoaded ||
+      !hazardClearStatusA.isLoaded ||
+      !hazardClearStatusB.isLoaded ||
+      !lifeLostStatusA.isLoaded ||
+      !lifeLostStatusB.isLoaded
+    ) {
       return;
     }
 
     audioPrimedRef.current = true;
-    void Promise.all([paperRustlePlayer.seekTo(0), hazardClearPlayer.seekTo(0)]).catch((error) => {
-      console.warn("audio prime failed", error);
-    });
-  }, [hazardClearPlayer, hazardClearStatus.isLoaded, paperRustlePlayer, paperRustleStatus.isLoaded]);
+    void (async () => {
+      await primeAudioPlayer(paperRustlePlayer, paperRustleStatus.duration);
+      await primeAudioPlayer(hazardClearPlayerA, hazardClearStatusA.duration);
+      await primeAudioPlayer(hazardClearPlayerB, hazardClearStatusB.duration);
+      await primeAudioPlayer(lifeLostPlayerA, lifeLostStatusA.duration);
+      await primeAudioPlayer(lifeLostPlayerB, lifeLostStatusB.duration);
+    })()
+      .then(() => {
+        setAudioReady(true);
+      })
+      .catch((error) => {
+        console.warn("audio prime failed", error);
+      });
+  }, [
+    audioSessionReady,
+    hazardClearPlayerA,
+    hazardClearPlayerB,
+    hazardClearStatusA.duration,
+    hazardClearStatusA.isLoaded,
+    hazardClearStatusB.duration,
+    hazardClearStatusB.isLoaded,
+    lifeLostPlayerA,
+    lifeLostPlayerB,
+    lifeLostStatusA.duration,
+    lifeLostStatusA.isLoaded,
+    lifeLostStatusB.duration,
+    lifeLostStatusB.isLoaded,
+    paperRustlePlayer,
+    paperRustleStatus.duration,
+    paperRustleStatus.isLoaded,
+  ]);
 
   useEffect(() => {
-    const pendingSound = pendingSoundRef.current;
-    if (!pendingSound) {
+    if (pendingSoundQueueRef.current.length === 0) {
       return;
     }
 
-    if (pendingSound === "paper-rustle" && paperRustleStatus.isLoaded) {
-      pendingSoundRef.current = null;
-      playSound(paperRustlePlayer);
-      return;
-    }
+    const pendingEffects = pendingSoundQueueRef.current;
+    pendingSoundQueueRef.current = [];
 
-    if (pendingSound === "hazard-clear" && hazardClearStatus.isLoaded) {
-      pendingSoundRef.current = null;
-      playSound(hazardClearPlayer);
+    for (const effect of pendingEffects) {
+      queueSound(effect);
     }
-  }, [hazardClearPlayer, hazardClearStatus.isLoaded, paperRustlePlayer, paperRustleStatus.isLoaded]);
+  }, [audioReady, hazardClearStatusA.isLoaded, hazardClearStatusB.isLoaded, lifeLostStatusA.isLoaded, lifeLostStatusB.isLoaded, paperRustleStatus.isLoaded]);
 
   useEffect(() => {
     let cancelled = false;
@@ -343,7 +548,7 @@ export function PhotoSliceGameScreen() {
         await setAudioModeAsync({
           playsInSilentMode: true,
           shouldPlayInBackground: false,
-          interruptionMode: "mixWithOthers",
+          interruptionMode: "doNotMix",
           shouldRouteThroughEarpiece: false,
         });
 
@@ -352,6 +557,12 @@ export function PhotoSliceGameScreen() {
         }
 
         await setIsAudioActiveAsync(true);
+
+        if (cancelled) {
+          return;
+        }
+
+        setAudioSessionReady(true);
       } catch (error) {
         console.warn("audio init failed", error);
       }
@@ -361,6 +572,8 @@ export function PhotoSliceGameScreen() {
 
     return () => {
       cancelled = true;
+      setAudioReady(false);
+      setAudioSessionReady(false);
       void setIsAudioActiveAsync(false);
     };
   }, []);
@@ -388,6 +601,21 @@ export function PhotoSliceGameScreen() {
   }, []);
 
   useEffect(() => {
+    if (!attemptStarted || gameState.status !== "playing") {
+      return;
+    }
+
+    let frameId = 0;
+    const updateRewardClock = () => {
+      setRewardClockMs(Date.now());
+      frameId = requestAnimationFrame(updateRewardClock);
+    };
+
+    frameId = requestAnimationFrame(updateRewardClock);
+    return () => cancelAnimationFrame(frameId);
+  }, [attemptStarted, gameState.status]);
+
+  useEffect(() => {
     if (attemptedInitialPhotoRef.current) {
       return;
     }
@@ -400,14 +628,106 @@ export function PhotoSliceGameScreen() {
     void loadOpenedPhotosCount();
   }, []);
 
+  useEffect(() => {
+    if (introVisible) {
+      if (gameMusicPlayer.playing) {
+        gameMusicPlayer.pause();
+      }
+
+      currentGameTrackIndexRef.current = 0;
+      try {
+        gameMusicPlayer.replace(GAME_MUSIC_TRACKS[0]);
+      } catch (error) {
+        console.warn("game music reset failed", error);
+      }
+      void gameMusicPlayer.seekTo(0).catch(() => undefined);
+      return;
+    }
+
+    if (introMusicPlayer.playing) {
+      introMusicPlayer.pause();
+    }
+    void introMusicPlayer.seekTo(0).catch(() => undefined);
+
+    currentGameTrackIndexRef.current = 0;
+    try {
+      gameMusicPlayer.replace(GAME_MUSIC_TRACKS[0]);
+    } catch (error) {
+      console.warn("game music replace failed", error);
+    }
+  }, [gameMusicPlayer, introMusicPlayer, introVisible]);
+
+  useEffect(() => {
+    if (!musicPreferenceLoaded) {
+      return;
+    }
+
+    if (musicMuted) {
+      if (introMusicPlayer.playing) {
+        introMusicPlayer.pause();
+      }
+
+      if (gameMusicPlayer.playing) {
+        gameMusicPlayer.pause();
+      }
+      return;
+    }
+
+    if (introVisible) {
+      if (gameMusicPlayer.playing) {
+        gameMusicPlayer.pause();
+      }
+
+      if (introMusicStatus.isLoaded && !introMusicStatus.playing) {
+        introMusicPlayer.play();
+      }
+      return;
+    }
+
+    if (introMusicPlayer.playing) {
+      introMusicPlayer.pause();
+    }
+
+    if (gameMusicStatus.isLoaded && !gameMusicStatus.playing) {
+      gameMusicPlayer.play();
+    }
+  }, [
+    gameMusicPlayer,
+    gameMusicStatus.isLoaded,
+    gameMusicStatus.playing,
+    introMusicPlayer,
+    introMusicStatus.isLoaded,
+    introMusicStatus.playing,
+    introVisible,
+    musicMuted,
+    musicPreferenceLoaded,
+  ]);
+
+  useEffect(() => {
+    if (!gameMusicStatus.didJustFinish || introVisible) {
+      return;
+    }
+
+    const nextTrackIndex = (currentGameTrackIndexRef.current + 1) % GAME_MUSIC_TRACKS.length;
+    currentGameTrackIndexRef.current = nextTrackIndex;
+
+    try {
+      gameMusicPlayer.replace(GAME_MUSIC_TRACKS[nextTrackIndex]);
+    } catch (error) {
+      console.warn("game music advance failed", error);
+    }
+  }, [gameMusicPlayer, gameMusicStatus.didJustFinish, introVisible]);
+
   const cursor = getCursorPosition(gameState);
   const cutTrail = gameState.activeCut ? getCutTrail(gameState.activeCut) : null;
   const openPercent = getOpenPercent(gameState);
   const hazardsLeft = gameState.hazards.length;
   const copy = UI_TEXT[language];
   const openedPhotosCount = openedPhotosByDifficulty[difficulty];
+  const coinVisualStates = getCoinVisualStates(levelReward, averageLevelDurationsMs[difficulty], openPercent, attemptStarted, gameState.status, rewardClockMs);
+  const currentLevelCoins = coinVisualStates.filter((coin) => coin.eclipseProgress < 1).length;
+  const nextDifficulty = getNextDifficulty(difficulty);
   const canPressPlay = !loadingPhoto && !attemptStarted;
-  const canChangeDifficulty = !loadingPhoto && !attemptStarted;
 
   useEffect(() => {
     setPhoto((current) => (current.uri ? current : { ...current, label: copy.demoLabel }));
@@ -424,15 +744,58 @@ export function PhotoSliceGameScreen() {
 
   useEffect(() => {
     if (previousStatusRef.current !== "won" && gameState.status === "won") {
+      const completedLevel = difficulty;
+      const remainingCoins = getVisibleBrightCoins(levelReward, averageLevelDurationsMs[completedLevel], openPercent, true, "playing");
+      const completionDurationMs = getCompletionDurationMs(levelReward, averageLevelDurationsMs[completedLevel]);
+      const nextCounts = {
+        ...openedPhotosByDifficulty,
+        [completedLevel]: openedPhotosByDifficulty[completedLevel] + 1,
+      };
+      const nextAverageDurations = updateAverageLevelDurations(averageLevelDurationsMs, completedLevel, completionDurationMs);
+      const nextTotalCoins = totalCoins + remainingCoins;
+
       setWonOverlayDismissed(false);
-      setOpenedPhotosByDifficulty((current) => {
-        const nextCounts = {
-          ...current,
-          [difficulty]: current[difficulty] + 1,
-        };
-        void persistOpenedPhotosCount(nextCounts);
-        return nextCounts;
-      });
+      setOpenedPhotosByDifficulty(nextCounts);
+      setAverageLevelDurationsMs(nextAverageDurations);
+      setLastWonCoins(remainingCoins);
+      setLevelReward((current) => ({
+        ...current,
+        brightCoins: remainingCoins,
+        startedAtMs: null,
+      }));
+
+      if (!remainingCoins || !rewardCardRef.current || !totalCoinsBadgeRef.current) {
+        setTotalCoins(nextTotalCoins);
+        void persistAppStats(nextCounts, musicMuted, nextTotalCoins, nextAverageDurations);
+      } else {
+        rewardCardRef.current.measureInWindow((sourceX, sourceY, sourceWidth, sourceHeight) => {
+          totalCoinsBadgeRef.current?.measureInWindow((targetX, targetY, targetWidth, targetHeight) => {
+            if (!sourceWidth || !sourceHeight || !targetWidth || !targetHeight) {
+              setTotalCoins(nextTotalCoins);
+              void persistAppStats(nextCounts, musicMuted, nextTotalCoins, nextAverageDurations);
+              return;
+            }
+
+            setCoinRewardFlight({
+              id: Date.now(),
+              count: remainingCoins,
+              source: { x: sourceX + sourceWidth / 2, y: sourceY + sourceHeight / 2 },
+              target: { x: targetX + targetWidth / 2, y: targetY + targetHeight / 2 },
+              finalTotalCoins: nextTotalCoins,
+              openedPhotosByDifficulty: nextCounts,
+              averageLevelDurationsMs: nextAverageDurations,
+            });
+          });
+        });
+      }
+    }
+
+    if (previousStatusRef.current !== "lost" && gameState.status === "lost") {
+      setLevelReward((current) => ({
+        ...current,
+        brightCoins: 0,
+        startedAtMs: null,
+      }));
     }
 
     if (gameState.status === "won" || gameState.status === "lost") {
@@ -444,14 +807,15 @@ export function PhotoSliceGameScreen() {
     }
 
     previousStatusRef.current = gameState.status;
-  }, [gameState.status]);
+  }, [averageLevelDurationsMs, difficulty, gameState.status, levelReward, musicMuted, openPercent, openedPhotosByDifficulty, totalCoins]);
 
   useEffect(() => {
-    if (!attemptStarted && gameState.status !== "won") {
-      setGameState(createInitialGameState(difficultyTheme.hazardCount));
+    if (!attemptStarted && gameState.status === "playing") {
+      setGameState(createGameStateForLevel(difficulty, levelNumber));
       setBursts([]);
+      setLevelReward(createLevelRewardState(difficulty, averageLevelDurationsMs));
     }
-  }, [difficultyTheme.hazardCount]);
+  }, [attemptStarted, averageLevelDurationsMs, difficulty, gameState.status, levelNumber]);
 
   useEffect(() => {
     if (previousOpenPercentRef.current == null) {
@@ -493,14 +857,17 @@ export function PhotoSliceGameScreen() {
 
       if (!APP_STATS_FILE.exists) {
         setOpenedPhotosByDifficulty(EMPTY_OPENED_PHOTOS_BY_DIFFICULTY);
+        setMusicMuted(false);
+        setMusicPreferenceLoaded(true);
         return;
       }
 
       const raw = await APP_STATS_FILE.text();
-      const parsed = JSON.parse(raw) as {
-        openedPhotosCount?: number;
-        openedPhotosByDifficulty?: Partial<OpenedPhotosByDifficulty>;
-      };
+      const parsed = JSON.parse(raw) as AppStats;
+
+      setMusicMuted(parsed.musicMuted ?? false);
+      setTotalCoins(parsed.totalCoins ?? 0);
+      setAverageLevelDurationsMs(mergeAverageDurations(parsed.averageLevelDurationsMs));
 
       if (parsed.openedPhotosByDifficulty) {
         setOpenedPhotosByDifficulty({
@@ -510,6 +877,7 @@ export function PhotoSliceGameScreen() {
           blizzard: parsed.openedPhotosByDifficulty.blizzard ?? 0,
           apocalypse: parsed.openedPhotosByDifficulty.apocalypse ?? 0,
         });
+        setMusicPreferenceLoaded(true);
         return;
       }
 
@@ -518,17 +886,32 @@ export function PhotoSliceGameScreen() {
           ...EMPTY_OPENED_PHOTOS_BY_DIFFICULTY,
           stormy: parsed.openedPhotosCount ?? 0,
         });
+        setMusicPreferenceLoaded(true);
         return;
       }
 
       setOpenedPhotosByDifficulty(EMPTY_OPENED_PHOTOS_BY_DIFFICULTY);
+      setMusicPreferenceLoaded(true);
     } catch (error) {
       console.warn("could not load app stats", error);
       setOpenedPhotosByDifficulty(EMPTY_OPENED_PHOTOS_BY_DIFFICULTY);
+      setTotalCoins(0);
+      setAverageLevelDurationsMs(DEFAULT_LEVEL_DURATION_MS);
+      setMusicMuted(false);
+      setMusicPreferenceLoaded(true);
     }
   }
 
   async function persistOpenedPhotosCount(nextCounts: OpenedPhotosByDifficulty) {
+    await persistAppStats(nextCounts, musicMuted, totalCoins, averageLevelDurationsMs);
+  }
+
+  async function persistAppStats(
+    nextCounts: OpenedPhotosByDifficulty,
+    nextMusicMuted: boolean,
+    nextTotalCoins: number,
+    nextAverageDurations: AverageLevelDurationsMs,
+  ) {
     try {
       if (!APP_STORAGE_DIRECTORY.exists) {
         APP_STORAGE_DIRECTORY.create({ idempotent: true, intermediates: true });
@@ -538,13 +921,61 @@ export function PhotoSliceGameScreen() {
         APP_STATS_FILE.create({ intermediates: true, overwrite: true });
       }
 
-      APP_STATS_FILE.write(JSON.stringify({ openedPhotosByDifficulty: nextCounts }));
+      APP_STATS_FILE.write(
+        JSON.stringify({
+          openedPhotosByDifficulty: nextCounts,
+          musicMuted: nextMusicMuted,
+          totalCoins: nextTotalCoins,
+          averageLevelDurationsMs: nextAverageDurations,
+        }),
+      );
     } catch (error) {
       console.warn("could not persist app stats", error);
     }
   }
 
-  async function handleRandomPhoto(startAttempt = false, nextDifficulty = difficulty) {
+  function toggleMusicMuted() {
+    setMusicMuted((current) => {
+      const next = !current;
+      void persistAppStats(openedPhotosByDifficulty, next, totalCoins, averageLevelDurationsMs);
+      return next;
+    });
+  }
+
+  function buyLife() {
+    if (totalCoins < LIFE_COST_COINS || gameState.status !== "playing" || coinSpendFlight) {
+      return;
+    }
+
+    const nextTotalCoins = totalCoins - LIFE_COST_COINS;
+    if (!totalCoinsBadgeRef.current || !livesCardRef.current) {
+      setTotalCoins(nextTotalCoins);
+      setGameState((current) => (current.status === "playing" ? { ...current, lives: current.lives + 1 } : current));
+      void persistAppStats(openedPhotosByDifficulty, musicMuted, nextTotalCoins, averageLevelDurationsMs);
+      return;
+    }
+
+    totalCoinsBadgeRef.current.measureInWindow((sourceX, sourceY, sourceWidth, sourceHeight) => {
+      livesCardRef.current?.measureInWindow((targetX, targetY, targetWidth, targetHeight) => {
+        if (!sourceWidth || !sourceHeight || !targetWidth || !targetHeight) {
+          setTotalCoins(nextTotalCoins);
+          setGameState((current) => (current.status === "playing" ? { ...current, lives: current.lives + 1 } : current));
+          void persistAppStats(openedPhotosByDifficulty, musicMuted, nextTotalCoins, averageLevelDurationsMs);
+          return;
+        }
+
+        setCoinSpendFlight({
+          id: Date.now(),
+          count: LIFE_COST_COINS,
+          source: { x: sourceX + sourceWidth / 2, y: sourceY + sourceHeight / 2 },
+          target: { x: targetX + targetWidth / 2, y: targetY + targetHeight / 2 },
+          finalTotalCoins: nextTotalCoins,
+        });
+      });
+    });
+  }
+
+  async function handleRandomPhoto(startAttempt = false, nextDifficulty = difficulty, nextLevelNumber = levelNumber) {
     const nextTheme = DIFFICULTY_THEMES[nextDifficulty];
 
     setLoadingPhoto(true);
@@ -563,7 +994,8 @@ export function PhotoSliceGameScreen() {
           height: null,
         });
         setBursts([]);
-        setGameState(createInitialGameState(nextTheme.hazardCount));
+        setGameState(createGameStateForLevel(nextDifficulty, nextLevelNumber));
+        setLevelReward(createLevelRewardState(nextDifficulty, averageLevelDurationsMs, startAttempt));
         setAttemptStarted(startAttempt);
         return;
       }
@@ -577,7 +1009,8 @@ export function PhotoSliceGameScreen() {
         height: imageSize.height,
       });
       setBursts([]);
-      setGameState(createInitialGameState(nextTheme.hazardCount));
+      setGameState(createGameStateForLevel(nextDifficulty, nextLevelNumber));
+      setLevelReward(createLevelRewardState(nextDifficulty, averageLevelDurationsMs, startAttempt));
       setAttemptStarted(startAttempt);
     } catch (error) {
       setPhoto({
@@ -587,7 +1020,8 @@ export function PhotoSliceGameScreen() {
         height: null,
       });
       setBursts([]);
-      setGameState(createInitialGameState(nextTheme.hazardCount));
+      setGameState(createGameStateForLevel(nextDifficulty, nextLevelNumber));
+      setLevelReward(createLevelRewardState(nextDifficulty, averageLevelDurationsMs, startAttempt));
       setAttemptStarted(startAttempt);
 
       if (error instanceof Error && error.message === "permission-denied") {
@@ -643,8 +1077,9 @@ export function PhotoSliceGameScreen() {
   }
 
   function resetLevel() {
-    setGameState(createInitialGameState(difficultyTheme.hazardCount));
+    setGameState(createGameStateForLevel(difficulty, levelNumber));
     setBursts([]);
+    setLevelReward(createLevelRewardState(difficulty, averageLevelDurationsMs));
     setAttemptStarted(false);
   }
 
@@ -654,49 +1089,86 @@ export function PhotoSliceGameScreen() {
     }
 
     if (gameState.status === "won") {
-      await handleRandomPhoto(true);
+      const upcomingDifficulty = getNextDifficulty(difficulty);
+      const upcomingLevelNumber = levelNumber + 1;
+      setDifficulty(upcomingDifficulty);
+      setLevelNumber(upcomingLevelNumber);
+      await handleRandomPhoto(true, upcomingDifficulty, upcomingLevelNumber);
       return;
     }
 
     setBursts([]);
-    setGameState(createInitialGameState(difficultyTheme.hazardCount));
+    setGameState(createGameStateForLevel(difficulty, levelNumber));
+    setLevelReward(createLevelRewardState(difficulty, averageLevelDurationsMs, true));
     setAttemptStarted(true);
   }
 
-  function queueSound(effect: "paper-rustle" | "hazard-clear") {
-    if (effect === "paper-rustle") {
-      if (paperRustleStatus.isLoaded) {
-        playSound(paperRustlePlayer);
-        return;
-      }
-    } else if (hazardClearStatus.isLoaded) {
-      playSound(hazardClearPlayer);
+  function queueSound(effect: SoundEffect) {
+    if (!audioReady) {
+      pendingSoundQueueRef.current.push(effect);
       return;
     }
 
-    pendingSoundRef.current = effect;
+    if (effect === "life-lost") {
+      playLifeLostSoundImmediate();
+      return;
+    }
+
+    const nextHazardPlayerIndex = currentHazardPlayerIndexRef.current;
+    const player =
+      effect === "paper-rustle"
+        ? paperRustlePlayer
+        : nextHazardPlayerIndex === 0
+          ? hazardClearPlayerA
+          : hazardClearPlayerB;
+    const isLoaded =
+      effect === "paper-rustle"
+        ? paperRustleStatus.isLoaded
+        : nextHazardPlayerIndex === 0
+          ? hazardClearStatusA.isLoaded
+          : hazardClearStatusB.isLoaded;
+
+    if (!isLoaded) {
+      pendingSoundQueueRef.current.push(effect);
+      return;
+    }
+
+    if (effect === "hazard-clear") {
+      currentHazardPlayerIndexRef.current = nextHazardPlayerIndex === 0 ? 1 : 0;
+    }
+
+    soundReplayTasksRef.current[effect] = soundReplayTasksRef.current[effect]
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await restartSoundEffectPlayer(player);
+        } catch (error) {
+          console.warn("sound playback failed", error);
+        }
+      });
   }
 
-  async function handleCycleDifficulty() {
-    if (!canChangeDifficulty) {
+  function playLifeLostSoundImmediate() {
+    const nextLifeLostPlayerIndex = currentLifeLostPlayerIndexRef.current;
+    const player = nextLifeLostPlayerIndex === 0 ? lifeLostPlayerA : lifeLostPlayerB;
+    const isLoaded = nextLifeLostPlayerIndex === 0 ? lifeLostStatusA.isLoaded : lifeLostStatusB.isLoaded;
+
+    if (!audioReady || !isLoaded) {
+      pendingSoundQueueRef.current.push("life-lost");
       return;
     }
 
-    const currentIndex = DIFFICULTY_ORDER.indexOf(difficulty);
-    const nextDifficulty = DIFFICULTY_ORDER[(currentIndex + 1) % DIFFICULTY_ORDER.length];
-    const shouldLoadNewPhoto = gameState.status === "won";
+    currentLifeLostPlayerIndexRef.current = nextLifeLostPlayerIndex === 0 ? 1 : 0;
 
-    setDifficulty(nextDifficulty);
-    setBursts([]);
-    setAttemptStarted(false);
-    setWonOverlayDismissed(false);
-
-    if (shouldLoadNewPhoto) {
-      await handleRandomPhoto(false, nextDifficulty);
-      return;
-    }
-
-    setGameState(createInitialGameState(DIFFICULTY_THEMES[nextDifficulty].hazardCount));
+    soundReplayTasksRef.current["life-lost"] = soundReplayTasksRef.current["life-lost"]
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await restartSoundEffectPlayer(player);
+        } catch (error) {
+          console.warn("life lost playback failed", error);
+        }
+      });
   }
 
   function handleGameEvent(event: PhotoSliceGameEvent) {
@@ -704,13 +1176,14 @@ export function PhotoSliceGameScreen() {
     const targetScale = event.type === "life-lost" ? livesScale : hazardsScale;
 
     if (event.type === "life-lost") {
-      Vibration.vibrate(40);
+      pulseCounter(targetScale);
+      Vibration.vibrate([0, 44, 26, 52, 24, 68]);
+      playLifeLostSoundImmediate();
     } else {
       suppressNextOpenedSoundRef.current = true;
       queueSound("hazard-clear");
+      pulseCounter(targetScale);
     }
-
-    pulseCounter(targetScale);
 
     if (!boardLayout || !targetLayout) {
       return;
@@ -825,8 +1298,45 @@ export function PhotoSliceGameScreen() {
               <GameTitleMark title={copy.title} variant="header" />
             </View>
             <View style={styles.headerActions}>
+              <MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />
               <IconButton label="?" onPress={() => setHelpVisible(true)} />
               <IconButton label="⚙" onPress={() => setSettingsVisible(true)} />
+            </View>
+          </View>
+          <View style={styles.metaRow}>
+            <View style={styles.levelBadge}>
+              <Text style={styles.levelBadgeLabel}>{copy.level}</Text>
+              <Text style={styles.levelBadgeValue}>{levelNumber}</Text>
+              <Text style={styles.levelBadgeCaption}>{getDifficultyLabel(difficulty, copy)}</Text>
+            </View>
+            <View ref={totalCoinsBadgeRef} style={styles.totalCoinsBadge}>
+              <Text style={styles.totalCoinsLabel}>{copy.totalCoins}</Text>
+              <Animated.Text style={[styles.totalCoinsValue, { transform: [{ scale: totalCoinsScale }] }]}>{totalCoins}</Animated.Text>
+            </View>
+          </View>
+            <View ref={rewardCardRef} style={styles.rewardCard}>
+            <View style={styles.coinRow}>
+              {coinVisualStates.map((coin) => (
+                <View key={`${difficulty}-coin-${coin.index}`} style={[styles.coinTokenShell, coinRewardFlight ? styles.coinTokenSourceHidden : null]}>
+                  <LinearGradient
+                    colors={["#fff7b0", "#facc15", "#d97706"]}
+                    start={{ x: 0.18, y: 0.08 }}
+                    end={{ x: 0.82, y: 0.95 }}
+                    style={[styles.coinToken, styles.coinTokenBright]}
+                  >
+                    <View style={styles.coinTokenRim} />
+                    <View style={styles.coinTokenInnerRing} />
+                    <View style={styles.coinTokenShine} />
+                  </LinearGradient>
+                  <View
+                    style={[
+                      styles.coinTokenEclipse,
+                      styles.coinTokenDim,
+                      { width: Math.round(COIN_TOKEN_SIZE * coin.eclipseProgress) },
+                    ]}
+                  />
+                </View>
+              ))}
             </View>
           </View>
         </View>
@@ -834,15 +1344,26 @@ export function PhotoSliceGameScreen() {
         <View style={styles.gameStage}>
           <Pressable style={styles.stageCard} onPress={(event) => handleStagePress(event.nativeEvent.pageX, event.nativeEvent.pageY)}>
             <View style={styles.statsRow}>
-              <OpenedStatCard
+              <StatCard
                 label={copy.opened}
-                primaryValue={`${openPercent}%`}
-                secondaryValue={String(openedPhotosCount)}
+                value={`${openPercent}%`}
                 scale={openedScale}
                 onLayout={captureLayout(setOpenedLayout)}
+                accentColor="#67e8f9"
+                allowValueResize={false}
               />
               <StatCard label={copy.hazards} value={String(hazardsLeft)} scale={hazardsScale} onLayout={captureLayout(setHazardsLayout)} accentColor="#fde047" />
-              <StatCard label={copy.lives} value={String(gameState.lives)} scale={livesScale} onLayout={captureLayout(setLivesLayout)} accentColor="#67e8f9" />
+              <StatCard
+                targetRef={livesCardRef}
+                label={copy.lives}
+                value={String(gameState.lives)}
+                scale={livesScale}
+                onLayout={captureLayout(setLivesLayout)}
+                accentColor="#67e8f9"
+                actionLabel="+"
+                actionDisabled={totalCoins < LIFE_COST_COINS || gameState.status !== "playing" || Boolean(coinSpendFlight)}
+                onAction={buyLife}
+              />
             </View>
 
             <View
@@ -865,8 +1386,8 @@ export function PhotoSliceGameScreen() {
 
                 {gameState.hazards.map((hazard) => (
                   <G key={hazard.id} rotation={hazard.angle} origin={`${hazard.position.x}, ${hazard.position.y}`}>
-                    <Polygon points={buildShurikenPoints(hazard.position, hazard.radius)} fill="#f97316" stroke="#fff5ea" strokeWidth="5" />
-                    <Circle cx={hazard.position.x} cy={hazard.position.y} r={hazard.radius * 0.28} fill="#fff8ef" />
+                    <Polygon points={buildShurikenPoints(hazard.position, hazard.radius)} fill={getHazardColors(hazard.kind).fill} stroke={getHazardColors(hazard.kind).stroke} strokeWidth="5" />
+                    <Circle cx={hazard.position.x} cy={hazard.position.y} r={hazard.radius * 0.28} fill={getHazardColors(hazard.kind).center} />
                   </G>
                 ))}
 
@@ -884,6 +1405,7 @@ export function PhotoSliceGameScreen() {
                 <View style={styles.overlayBanner}>
                   <Text style={styles.overlayTitle}>{copy.wonTitle}</Text>
                   <Text style={styles.overlayText}>{copy.wonBody}</Text>
+                  <Text style={styles.winCoinsText}>{copy.coinsWon}: +{lastWonCoins}</Text>
                   <Pressable style={styles.overlayButton} onPress={() => setWonOverlayDismissed(true)}>
                     <Text style={styles.overlayButtonText}>{copy.ok}</Text>
                   </Pressable>
@@ -914,21 +1436,57 @@ export function PhotoSliceGameScreen() {
         </View>
 
         <View style={styles.controlsCard}>
-          <View style={styles.buttonGrid}>
-            <ActionButton label={loadingPhoto ? copy.loading : copy.playButton} disabled={!canPressPlay} stretch onPress={() => void handlePlayPress()} />
-            <ActionButton
-              label={getDifficultyLabel(difficulty, copy)}
-              accentColor={difficultyTheme.accent}
-              textColor={difficultyTheme.foreground}
-              disabled={!canChangeDifficulty}
-              stretch
-              onPress={() => void handleCycleDifficulty()}
-            />
-          </View>
+          <ActionButton
+            label={loadingPhoto ? copy.loading : copy.playButton}
+            accentColor={difficultyTheme.accent}
+            textColor={difficultyTheme.foreground}
+            onPress={() => void handlePlayPress()}
+            disabled={!canPressPlay}
+          />
         </View>
+
       </ScrollView>
 
-      <OverlaySheet visible={helpVisible} title={copy.helpTitle} onClose={() => setHelpVisible(false)} closeLabel={copy.close}>
+      {coinRewardFlight ? (
+        <CoinRewardFlightLayer
+          flight={coinRewardFlight}
+          onCoinArrive={() => {
+            setTotalCoins((current) => current + 1);
+            pulseCounter(totalCoinsScale);
+          }}
+          onComplete={() => {
+            void persistAppStats(
+              coinRewardFlight.openedPhotosByDifficulty,
+              musicMuted,
+              coinRewardFlight.finalTotalCoins,
+              coinRewardFlight.averageLevelDurationsMs,
+            );
+            setCoinRewardFlight(null);
+          }}
+        />
+      ) : null}
+
+      {coinSpendFlight ? (
+        <CoinSpendFlightLayer
+          flight={coinSpendFlight}
+          onComplete={() => {
+            setTotalCoins((current) => current - coinSpendFlight.count);
+            pulseCounter(totalCoinsScale);
+            setGameState((current) => (current.status === "playing" ? { ...current, lives: current.lives + 1 } : current));
+            pulseCounter(livesScale);
+            void persistAppStats(openedPhotosByDifficulty, musicMuted, coinSpendFlight.finalTotalCoins, averageLevelDurationsMs);
+            setCoinSpendFlight(null);
+          }}
+        />
+      ) : null}
+
+      <OverlaySheet
+        visible={helpVisible}
+        title={copy.helpTitle}
+        onClose={() => setHelpVisible(false)}
+        closeLabel={copy.close}
+        extraAction={<MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />}
+      >
         {copy.helpLines.map((line) => (
           <Text key={line} style={styles.helpLine}>
             {line}
@@ -936,7 +1494,13 @@ export function PhotoSliceGameScreen() {
         ))}
       </OverlaySheet>
 
-      <OverlaySheet visible={settingsVisible} title={copy.settingsTitle} onClose={() => setSettingsVisible(false)} closeLabel={copy.close}>
+      <OverlaySheet
+        visible={settingsVisible}
+        title={copy.settingsTitle}
+        onClose={() => setSettingsVisible(false)}
+        closeLabel={copy.close}
+        extraAction={<MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />}
+      >
         <View style={styles.settingSection}>
           <Text style={styles.settingTitle}>{copy.languageTitle}</Text>
           <OptionRow label={copy.languageRu} active={language === "ru"} onPress={() => setLanguage("ru")} activeLabel={copy.settingsOn} inactiveLabel={copy.settingsOff} />
@@ -961,7 +1525,14 @@ export function PhotoSliceGameScreen() {
         </View>
       </OverlaySheet>
 
-      <NoticeDialog visible={notice != null} title={notice?.title ?? ""} body={notice?.body ?? ""} closeLabel={copy.close} onClose={() => setNotice(null)} />
+      <NoticeDialog
+        visible={notice != null}
+        title={notice?.title ?? ""}
+        body={notice?.body ?? ""}
+        closeLabel={copy.close}
+        onClose={() => setNotice(null)}
+        extraAction={<MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />}
+      />
 
       <Modal animationType="fade" transparent visible={introVisible} onRequestClose={() => setIntroVisible(false)}>
         <ScrollView
@@ -971,6 +1542,10 @@ export function PhotoSliceGameScreen() {
           showsVerticalScrollIndicator={false}
         >
           <View style={styles.introCard}>
+            <View style={styles.introHeaderRow}>
+              <View style={styles.introHeaderSpacer} />
+              <MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />
+            </View>
             <GameTitleMark title={copy.splashTitle} variant="intro" />
             <GameplayPreview />
             <ActionButton label={copy.startGame} onPress={() => setIntroVisible(false)} />
@@ -987,17 +1562,20 @@ function NoticeDialog({
   body,
   closeLabel,
   onClose,
+  extraAction,
 }: {
   visible: boolean;
   title: string;
   body: string;
   closeLabel: string;
   onClose: () => void;
+  extraAction?: React.ReactNode;
 }) {
   return (
     <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={[styles.modalCard, styles.noticeCard]} onPress={() => undefined}>
+          {extraAction ? <View style={styles.modalHeaderRow}>{extraAction}</View> : null}
           <View style={styles.noticeBadge}>
             <Text style={styles.noticeBadgeText}>i</Text>
           </View>
@@ -1008,15 +1586,6 @@ function NoticeDialog({
       </Pressable>
     </Modal>
   );
-}
-
-function playSound(player: ReturnType<typeof useAudioPlayer>) {
-  try {
-    void player.seekTo(0);
-    player.play();
-  } catch (error) {
-    console.warn("sound playback failed", error);
-  }
 }
 
 function DemoBackdrop() {
@@ -1033,19 +1602,42 @@ function DemoBackdrop() {
 
 function GameTitleMark({ title, variant }: { title: string; variant: "header" | "intro" }) {
   const isIntro = variant === "intro";
+  const firstOIndex = title.toLowerCase().indexOf("o");
 
   return (
     <View style={[styles.titleMark, isIntro ? styles.titleMarkIntro : styles.titleMarkHeader]}>
-      <View style={[styles.titleMarkAccent, isIntro ? styles.titleMarkAccentIntro : null]} />
-      <View style={[styles.titleGlyphWrap, isIntro ? styles.titleGlyphWrapIntro : null]}>
-        <Text
-          numberOfLines={1}
-          adjustsFontSizeToFit
-          minimumFontScale={0.55}
-          style={[styles.titleGlyphText, isIntro ? styles.titleGlyphTextIntro : styles.titleGlyphTextHeader]}
-        >
-          {title}
-        </Text>
+      <View
+        accessibilityLabel={title}
+        accessible
+        style={[styles.titleGlyphWrap, isIntro ? styles.titleGlyphWrapIntro : null]}
+      >
+        {Array.from(title).map((character, index) =>
+          /^o$/i.test(character) && index === firstOIndex ? (
+            <Svg
+              key={`${character}-${index}`}
+              width={isIntro ? 28 : 17}
+              height={isIntro ? 28 : 17}
+              viewBox="0 0 40 40"
+              style={[styles.titleShuriken, isIntro ? styles.titleShurikenIntro : null]}
+            >
+              <Polygon
+                points={buildShurikenPoints({ x: 20, y: 20 }, 19)}
+                fill="#f97316"
+                stroke="#fff5ea"
+                strokeWidth={4}
+              />
+              <Circle cx={20} cy={20} r={5.3} fill="#fff8ef" />
+            </Svg>
+          ) : (
+            <Text
+              key={`${character}-${index}`}
+              numberOfLines={1}
+              style={[styles.titleGlyphText, isIntro ? styles.titleGlyphTextIntro : styles.titleGlyphTextHeader]}
+            >
+              {character}
+            </Text>
+          ),
+        )}
       </View>
     </View>
   );
@@ -1084,19 +1676,24 @@ function OverlaySheet({
   title,
   closeLabel,
   onClose,
+  extraAction,
   children,
 }: {
   visible: boolean;
   title: string;
   closeLabel: string;
   onClose: () => void;
+  extraAction?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <Modal animationType="fade" transparent visible={visible} onRequestClose={onClose}>
       <Pressable style={styles.modalBackdrop} onPress={onClose}>
         <Pressable style={styles.modalCard} onPress={() => undefined}>
-          <Text style={styles.modalTitle}>{title}</Text>
+          <View style={styles.modalTitleRow}>
+            <Text style={styles.modalTitle}>{title}</Text>
+            {extraAction}
+          </View>
           <View style={styles.modalBody}>{children}</View>
           <ActionButton label={closeLabel} onPress={onClose} />
         </Pressable>
@@ -1170,66 +1767,69 @@ function IconButton({ label, onPress }: { label: string; onPress: () => void }) 
   );
 }
 
+function MusicToggleButton({ muted, onPress }: { muted: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={styles.iconButton} onPress={onPress}>
+      <View style={styles.musicToggleIconWrap}>
+        <Text style={styles.musicToggleIconText}>♪</Text>
+        {muted ? <View style={styles.musicToggleSlash} /> : null}
+      </View>
+    </Pressable>
+  );
+}
+
 function StatCard({
+  targetRef,
   label,
   value,
   scale,
   onLayout,
   accentColor,
+  allowValueResize = true,
+  actionLabel,
+  actionDisabled = false,
+  onAction,
 }: {
+  targetRef?: RefObject<View | null>;
   label: string;
   value: string;
   scale?: Animated.Value;
   onLayout?: (event: LayoutChangeEvent) => void;
   accentColor?: string;
+  allowValueResize?: boolean;
+  actionLabel?: string;
+  actionDisabled?: boolean;
+  onAction?: () => void;
 }) {
   const Container = scale ? Animated.View : View;
   return (
-    <Container style={[styles.statCard, scale ? { transform: [{ scale }] } : null, accentColor ? { borderColor: `${accentColor}33` } : null]} onLayout={onLayout}>
+    <Container ref={targetRef} style={[styles.statCard, scale ? { transform: [{ scale }] } : null, accentColor ? { borderColor: `${accentColor}33` } : null]} onLayout={onLayout}>
       <Text style={styles.statLabel}>{label}</Text>
-      <View style={[styles.statValueFrame, accentColor ? { borderColor: `${accentColor}26` } : null]}>
-        <Text
-          numberOfLines={1}
-          adjustsFontSizeToFit
-          minimumFontScale={0.68}
-          style={[styles.statValue, accentColor ? { color: accentColor } : null]}
-        >
-          {value}
-        </Text>
-      </View>
-    </Container>
-  );
-}
-
-function OpenedStatCard({
-  label,
-  primaryValue,
-  secondaryValue,
-  scale,
-  onLayout,
-}: {
-  label: string;
-  primaryValue: string;
-  secondaryValue: string;
-  scale?: Animated.Value;
-  onLayout?: (event: LayoutChangeEvent) => void;
-}) {
-  const Container = scale ? Animated.View : View;
-
-  return (
-    <Container style={[styles.statCard, styles.openedStatCard, scale ? { transform: [{ scale }] } : null]} onLayout={onLayout}>
-      <Text style={styles.statLabel}>{label}</Text>
-      <View style={styles.openedStatValuesRow}>
-        <View style={styles.statValueFrame}>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68} style={styles.statValue}>
-            {primaryValue}
+      <View style={styles.statValueRow}>
+        <View style={[styles.statValueFrame, accentColor ? { borderColor: `${accentColor}26` } : null]}>
+          <Text
+            numberOfLines={1}
+            adjustsFontSizeToFit={allowValueResize}
+            minimumFontScale={allowValueResize ? 0.68 : undefined}
+            style={[styles.statValue, accentColor ? { color: accentColor } : null]}
+          >
+            {value}
           </Text>
         </View>
-        <View style={styles.statValueFrame}>
-          <Text numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68} style={styles.statValue}>
-            {secondaryValue}
-          </Text>
-        </View>
+        {actionLabel && onAction ? (
+          <Pressable
+            accessibilityLabel="Add a life for two coins"
+            disabled={actionDisabled}
+            hitSlop={6}
+            onPress={(event) => {
+              event.stopPropagation();
+              onAction();
+            }}
+            style={[styles.statActionButton, actionDisabled ? styles.statActionButtonDisabled : null]}
+          >
+            <Text style={[styles.statActionButtonText, actionDisabled ? styles.statActionButtonTextDisabled : null]}>{actionLabel}</Text>
+          </Pressable>
+        ) : null}
       </View>
     </Container>
   );
@@ -1312,6 +1912,163 @@ function SparkBurstLayer({ burst, onComplete }: { burst: SparkBurst; onComplete:
   );
 }
 
+function CoinRewardFlightLayer({
+  flight,
+  onCoinArrive,
+  onComplete,
+}: {
+  flight: CoinRewardFlight;
+  onCoinArrive: () => void;
+  onComplete: () => void;
+}) {
+  const [coinIndex, setCoinIndex] = useState(0);
+  const progress = useRef(new Animated.Value(0)).current;
+  const onCoinArriveRef = useRef(onCoinArrive);
+  const onCompleteRef = useRef(onComplete);
+
+  useEffect(() => {
+    onCoinArriveRef.current = onCoinArrive;
+    onCompleteRef.current = onComplete;
+  }, [onCoinArrive, onComplete]);
+
+  useEffect(() => {
+    progress.stopAnimation();
+    progress.setValue(0);
+
+    Animated.sequence([
+      Animated.delay(coinIndex === 0 ? 420 : 220),
+      Animated.timing(progress, {
+        toValue: 1,
+        duration: 780,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (!finished) {
+        return;
+      }
+
+      onCoinArriveRef.current();
+      if (coinIndex + 1 === flight.count) {
+        onCompleteRef.current();
+      } else {
+        setCoinIndex((current) => current + 1);
+      }
+    });
+
+    return () => progress.stopAnimation();
+  }, [coinIndex, flight.count, progress]);
+
+  const deltaX = flight.target.x - flight.source.x;
+  const deltaY = flight.target.y - flight.source.y;
+  const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [0, deltaX] });
+  const translateY = progress.interpolate({ inputRange: [0, 0.58, 1], outputRange: [0, deltaY - 72, deltaY] });
+  const scale = progress.interpolate({ inputRange: [0, 0.12, 0.8, 1], outputRange: [0.7, 1.2, 0.9, 0.35] });
+  const opacity = progress.interpolate({ inputRange: [0, 0.08, 0.84, 1], outputRange: [0, 1, 1, 0] });
+
+  return (
+    <View pointerEvents="none" style={styles.coinRewardFlightLayer}>
+      <Animated.View
+        style={[
+          styles.coinRewardFlightToken,
+          {
+            left: flight.source.x - COIN_TOKEN_SIZE / 2,
+            top: flight.source.y - COIN_TOKEN_SIZE / 2,
+            opacity,
+            transform: [{ translateX }, { translateY }, { scale }],
+          },
+        ]}
+      >
+        <LinearGradient
+          colors={["#fff7b0", "#facc15", "#d97706"]}
+          start={{ x: 0.18, y: 0.08 }}
+          end={{ x: 0.82, y: 0.95 }}
+          style={[styles.coinToken, styles.coinTokenBright]}
+        >
+          <View style={styles.coinTokenRim} />
+          <View style={styles.coinTokenInnerRing} />
+          <View style={styles.coinTokenShine} />
+        </LinearGradient>
+      </Animated.View>
+    </View>
+  );
+}
+
+function CoinSpendFlightLayer({
+  flight,
+  onComplete,
+}: {
+  flight: CoinSpendFlight;
+  onComplete: () => void;
+}) {
+  const progress = useRef(new Animated.Value(0)).current;
+  const onCompleteRef = useRef(onComplete);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
+  useEffect(() => {
+    progress.stopAnimation();
+    progress.setValue(0);
+
+    Animated.sequence([
+      Animated.delay(140),
+      Animated.timing(progress, {
+        toValue: 1,
+        duration: 620,
+        easing: Easing.inOut(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start(({ finished }) => {
+      if (!finished) {
+        return;
+      }
+
+      onCompleteRef.current();
+    });
+
+    return () => progress.stopAnimation();
+  }, [progress]);
+
+  const deltaX = flight.target.x - flight.source.x;
+  const deltaY = flight.target.y - flight.source.y;
+  const translateX = progress.interpolate({ inputRange: [0, 1], outputRange: [0, deltaX] });
+  const translateY = progress.interpolate({ inputRange: [0, 0.52, 1], outputRange: [0, deltaY - 54, deltaY] });
+  const scale = progress.interpolate({ inputRange: [0, 0.12, 0.82, 1], outputRange: [0.7, 1.16, 0.88, 0.35] });
+  const opacity = progress.interpolate({ inputRange: [0, 0.08, 0.84, 1], outputRange: [0, 1, 1, 0] });
+
+  return (
+    <View pointerEvents="none" style={styles.coinRewardFlightLayer}>
+      {Array.from({ length: flight.count }, (_, index) => (
+        <Animated.View
+          key={index}
+          style={[
+            styles.coinRewardFlightToken,
+            {
+              left: flight.source.x - COIN_TOKEN_SIZE / 2 + (index - (flight.count - 1) / 2) * 13,
+              top: flight.source.y - COIN_TOKEN_SIZE / 2,
+              opacity,
+              transform: [{ translateX }, { translateY }, { scale }],
+            },
+          ]}
+        >
+          <LinearGradient
+            colors={["#fff7b0", "#facc15", "#d97706"]}
+            start={{ x: 0.18, y: 0.08 }}
+            end={{ x: 0.82, y: 0.95 }}
+            style={[styles.coinToken, styles.coinTokenBright]}
+          >
+            <View style={styles.coinTokenRim} />
+            <View style={styles.coinTokenInnerRing} />
+            <View style={styles.coinTokenShine} />
+          </LinearGradient>
+        </Animated.View>
+      ))}
+    </View>
+  );
+}
+
 function ActionButton({
   label,
   caption,
@@ -1362,6 +2119,166 @@ function getDifficultyLabel(level: DifficultyLevel, copy: (typeof UI_TEXT)[Langu
     case "apocalypse":
       return copy.difficultyApocalypse;
   }
+}
+
+function getNextDifficulty(level: DifficultyLevel) {
+  const currentIndex = DIFFICULTY_ORDER.indexOf(level);
+  return DIFFICULTY_ORDER[(currentIndex + 1) % DIFFICULTY_ORDER.length];
+}
+
+function createGameStateForLevel(level: DifficultyLevel, levelNumber: number) {
+  const hazardCount = DIFFICULTY_THEMES[level].hazardCount;
+  return createInitialGameState(hazardCount, getHazardKindsForLevel(levelNumber, hazardCount));
+}
+
+function getHazardKindsForLevel(levelNumber: number, hazardCount: number): HazardKind[] {
+  const cycle = Math.floor((levelNumber - 1) / DIFFICULTY_ORDER.length) + 1;
+  const specialHazards =
+    cycle === 1
+      ? []
+      : cycle === 2
+        ? ["red"]
+        : cycle === 3
+          ? ["red", "green"]
+          : cycle === 4
+            ? ["red", "red", "green"]
+            : cycle === 5
+              ? ["red", "green", "green"]
+              : cycle === 6
+                ? ["green", "green", "green"]
+                : cycle === 7
+                  ? Array(4).fill("green")
+                  : cycle === 8
+                    ? Array(5).fill("green")
+                    : Array(hazardCount).fill("green");
+
+  return [...specialHazards.slice(0, hazardCount), ...Array(Math.max(0, hazardCount - specialHazards.length)).fill("normal")] as HazardKind[];
+}
+
+function getHazardColors(kind: HazardKind) {
+  switch (kind) {
+    case "red":
+      return { fill: "#ef4444", stroke: "#fee2e2", center: "#fff1f2" };
+    case "green":
+      return { fill: "#22c55e", stroke: "#dcfce7", center: "#f0fdf4" };
+    default:
+      return { fill: "#f97316", stroke: "#fff5ea", center: "#fff8ef" };
+  }
+}
+
+function getLevelCoinCount(level: DifficultyLevel) {
+  return DIFFICULTY_ORDER.indexOf(level) + 1;
+}
+
+function mergeAverageDurations(partial?: Partial<AverageLevelDurationsMs>): AverageLevelDurationsMs {
+  return {
+    sunny: clampLevelDuration(partial?.sunny ?? DEFAULT_LEVEL_DURATION_MS.sunny),
+    cloudy: clampLevelDuration(partial?.cloudy ?? DEFAULT_LEVEL_DURATION_MS.cloudy),
+    stormy: clampLevelDuration(partial?.stormy ?? DEFAULT_LEVEL_DURATION_MS.stormy),
+    blizzard: clampLevelDuration(partial?.blizzard ?? DEFAULT_LEVEL_DURATION_MS.blizzard),
+    apocalypse: clampLevelDuration(partial?.apocalypse ?? DEFAULT_LEVEL_DURATION_MS.apocalypse),
+  };
+}
+
+function createLevelRewardState(level: DifficultyLevel, averageDurations: AverageLevelDurationsMs, startAttempt = false): LevelRewardState {
+  const totalCoins = getLevelCoinCount(level);
+  return {
+    totalCoins,
+    brightCoins: totalCoins,
+    startedAtMs: startAttempt ? Date.now() : null,
+    baselineDurationMs: averageDurations[level],
+  };
+}
+
+function getCoinVisualStates(
+  reward: LevelRewardState,
+  averageDurationMs: number,
+  openPercent: number,
+  attemptStarted: boolean,
+  status: PhotoSliceGameState["status"],
+  nowMs: number,
+): CoinVisualState[] {
+  const eclipseProgresses = getCoinEclipseProgresses(reward, averageDurationMs, openPercent, attemptStarted, status, nowMs);
+  return eclipseProgresses.map((eclipseProgress, index) => ({
+    index,
+    eclipseProgress,
+  }));
+}
+
+function getVisibleBrightCoins(
+  reward: LevelRewardState,
+  averageDurationMs: number,
+  openPercent: number,
+  attemptStarted: boolean,
+  status: PhotoSliceGameState["status"],
+) {
+  if (!attemptStarted || status !== "playing" || reward.startedAtMs == null) {
+    return reward.brightCoins;
+  }
+
+  const elapsedMs = Math.max(0, Date.now() - reward.startedAtMs);
+  const targetDurationMs = getCoinFadeDurationMs(reward.baselineDurationMs || averageDurationMs);
+  const fadeIntervalMs = Math.max(2400, targetDurationMs / reward.totalCoins);
+  return Math.max(0, reward.totalCoins - Math.floor(elapsedMs / fadeIntervalMs));
+}
+
+function getCoinEclipseProgresses(
+  reward: LevelRewardState,
+  averageDurationMs: number,
+  openPercent: number,
+  attemptStarted: boolean,
+  status: PhotoSliceGameState["status"],
+  nowMs: number,
+) {
+  if (!attemptStarted || status !== "playing" || reward.startedAtMs == null) {
+    const visibleCoins = reward.brightCoins;
+    return Array.from({ length: reward.totalCoins }, (_, index) => (index < visibleCoins ? 0 : 1));
+  }
+
+  const elapsedMs = Math.max(0, nowMs - reward.startedAtMs);
+  const targetDurationMs = getCoinFadeDurationMs(reward.baselineDurationMs || averageDurationMs);
+  const fadeIntervalMs = Math.max(2400, targetDurationMs / reward.totalCoins);
+
+  return Array.from({ length: reward.totalCoins }, (_, index) => {
+    const startedFadingAtMs = fadeIntervalMs * index;
+    return Math.min(1, Math.max(0, (elapsedMs - startedFadingAtMs) / fadeIntervalMs));
+  });
+}
+
+function getCoinFadeDurationMs(averageDurationMs: number) {
+  return clampLevelDuration(averageDurationMs * COIN_FADE_DURATION_MULTIPLIER);
+}
+
+function getAdaptiveTargetDurationMs(baseDurationMs: number, elapsedMs: number, openPercent: number) {
+  if (openPercent < 8) {
+    return clampLevelDuration(baseDurationMs);
+  }
+
+  const paceProjectionMs = (elapsedMs / Math.max(openPercent, 1)) * 100;
+  return clampLevelDuration(baseDurationMs * 0.62 + paceProjectionMs * 0.38);
+}
+
+function getCompletionDurationMs(reward: LevelRewardState, fallbackMs: number) {
+  if (reward.startedAtMs == null) {
+    return fallbackMs;
+  }
+
+  return clampLevelDuration(Date.now() - reward.startedAtMs);
+}
+
+function updateAverageLevelDurations(
+  current: AverageLevelDurationsMs,
+  completedDifficulty: DifficultyLevel,
+  completionDurationMs: number,
+): AverageLevelDurationsMs {
+  return {
+    ...current,
+    [completedDifficulty]: clampLevelDuration(current[completedDifficulty] * 0.7 + completionDurationMs * 0.3),
+  };
+}
+
+function clampLevelDuration(value: number) {
+  return Math.round(Math.min(MAX_LEVEL_DURATION_MS, Math.max(MIN_LEVEL_DURATION_MS, value)));
 }
 
 function buildShurikenPoints(center: Vector2, radius: number): string {
@@ -1435,6 +2352,7 @@ async function getCameraAlbumIds(): Promise<Set<string>> {
 
 async function collectRandomPhotoCandidates(sourceEntries: SourceEntry[], copy: (typeof UI_TEXT)[Language]) {
   const candidates: RandomPhotoCandidate[] = [];
+
   const needsMediaLibrary = sourceEntries.some((entry) => entry.kind === "camera" || entry.kind === "gallery");
 
   let mediaAssets: MediaLibrary.Asset[] = [];
@@ -1579,6 +2497,145 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     paddingTop: 4,
   },
+  metaRow: {
+    marginTop: 14,
+    flexDirection: "row",
+    gap: 10,
+  },
+  levelBadge: {
+    flex: 1.2,
+    minWidth: 0,
+    borderRadius: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: "#0b1628",
+    borderWidth: 1,
+    borderColor: "rgba(249, 115, 22, 0.26)",
+    gap: 2,
+  },
+  levelBadgeLabel: {
+    color: "#94a3b8",
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  levelBadgeValue: {
+    color: "#f8fafc",
+    fontSize: 28,
+    fontWeight: "900",
+  },
+  levelBadgeCaption: {
+    color: "#fdba74",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  totalCoinsBadge: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: 18,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: "#111d12",
+    borderWidth: 1,
+    borderColor: "rgba(250, 204, 21, 0.26)",
+    justifyContent: "center",
+    gap: 4,
+  },
+  totalCoinsLabel: {
+    color: "#94a3b8",
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 0.8,
+  },
+  totalCoinsValue: {
+    color: "#fde047",
+    fontSize: 28,
+    fontWeight: "900",
+  },
+  rewardCard: {
+    marginTop: 10,
+    borderRadius: 18,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: "#0b1628",
+    borderWidth: 1,
+    borderColor: "rgba(148, 163, 184, 0.14)",
+    alignItems: "center",
+  },
+  coinRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  coinTokenShell: {
+    width: COIN_TOKEN_SIZE,
+    height: COIN_TOKEN_SIZE,
+    borderRadius: COIN_TOKEN_SIZE / 2,
+    overflow: "hidden",
+    position: "relative",
+  },
+  coinTokenSourceHidden: {
+    opacity: 0,
+  },
+  coinToken: {
+    width: COIN_TOKEN_SIZE,
+    height: COIN_TOKEN_SIZE,
+    borderRadius: COIN_TOKEN_SIZE / 2,
+    overflow: "hidden",
+  },
+  coinTokenBright: {
+    borderWidth: 2,
+    borderColor: "#fff5b8",
+  },
+  coinTokenRim: {
+    position: "absolute",
+    inset: 3,
+    borderRadius: (COIN_TOKEN_SIZE - 6) / 2,
+    borderWidth: 2,
+    borderColor: "rgba(146, 64, 14, 0.48)",
+  },
+  coinTokenInnerRing: {
+    position: "absolute",
+    inset: 7,
+    borderRadius: (COIN_TOKEN_SIZE - 14) / 2,
+    borderWidth: 1,
+    borderColor: "rgba(255, 251, 235, 0.76)",
+  },
+  coinTokenShine: {
+    position: "absolute",
+    width: 9,
+    height: 5,
+    top: 4,
+    left: 6,
+    borderRadius: 999,
+    backgroundColor: "rgba(255, 255, 255, 0.78)",
+    transform: [{ rotate: "-32deg" }],
+  },
+  coinTokenEclipse: {
+    position: "absolute",
+    height: COIN_TOKEN_SIZE,
+    top: 0,
+    left: 0,
+    borderTopRightRadius: COIN_TOKEN_SIZE / 2,
+    borderBottomRightRadius: COIN_TOKEN_SIZE / 2,
+  },
+  coinTokenDim: {
+    backgroundColor: "#2b3548",
+    borderColor: "rgba(148, 163, 184, 0.3)",
+  },
+  coinRewardFlightLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 20,
+  },
+  coinRewardFlightToken: {
+    position: "absolute",
+    width: COIN_TOKEN_SIZE,
+    height: COIN_TOKEN_SIZE,
+    shadowColor: "#facc15",
+    shadowOpacity: 0.85,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 3 },
+    elevation: 10,
+  },
   titleMark: {
     width: "100%",
     minWidth: 0,
@@ -1589,48 +2646,31 @@ const styles = StyleSheet.create({
   titleMarkIntro: {
     alignItems: "center",
   },
-  titleMarkAccent: {
-    width: 82,
-    height: 10,
-    borderTopLeftRadius: 999,
-    borderBottomRightRadius: 999,
-    backgroundColor: "rgba(249, 115, 22, 0.9)",
-    marginBottom: 8,
-    transform: [{ rotate: "-8deg" }],
-  },
-  titleMarkAccentIntro: {
-    width: 120,
-    height: 12,
-    marginBottom: 14,
-  },
   titleGlyphWrap: {
     width: "100%",
     flexDirection: "row",
     alignItems: "center",
+    justifyContent: "flex-start",
     minWidth: 0,
-    transform: [{ rotate: "-2deg" }],
   },
   titleGlyphWrapIntro: {
-    transform: [{ rotate: "-3deg" }],
+    width: "auto",
+    justifyContent: "center",
   },
-  titleGlyphRowIntro: {
-    alignSelf: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
+  titleShuriken: {
+    marginHorizontal: 1,
+  },
+  titleShurikenIntro: {
+    marginHorizontal: 3,
   },
   titleGlyphText: {
-    flex: 1,
-    width: "100%",
-    color: "#f8fafc",
+    color: "#fb923c",
     fontWeight: "900",
-    fontStyle: "italic",
-    letterSpacing: 0.6,
+    letterSpacing: 0,
     includeFontPadding: false,
-    textShadowColor: "rgba(8, 21, 39, 0.85)",
-    textShadowOffset: { width: 0, height: 3 },
-    textShadowRadius: 10,
-    transform: [{ skewX: "-10deg" }],
+    textShadowColor: "#fff5ea",
+    textShadowOffset: { width: 1, height: 1 },
+    textShadowRadius: 1,
   },
   titleGlyphTextHeader: {
     fontSize: 19,
@@ -1639,8 +2679,6 @@ const styles = StyleSheet.create({
   titleGlyphTextIntro: {
     fontSize: 32,
     lineHeight: 36,
-    letterSpacing: 1.2,
-    textAlign: "center",
   },
   iconButton: {
     width: 36,
@@ -1657,10 +2695,34 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "800",
   },
+  musicToggleIconWrap: {
+    width: 24,
+    height: 24,
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  musicToggleIconText: {
+    color: "#f8fafc",
+    fontSize: 24,
+    lineHeight: 24,
+    fontWeight: "900",
+  },
+  musicToggleSlash: {
+    position: "absolute",
+    width: 28,
+    height: 3,
+    borderRadius: 999,
+    backgroundColor: "#fb923c",
+    transform: [{ rotate: "-40deg" }],
+    shadowColor: "#000000",
+    shadowOpacity: 0.35,
+    shadowRadius: 2,
+  },
   statsRow: {
     width: "100%",
     flexDirection: "row",
-    gap: 10,
+    gap: 7,
   },
   gameStage: {
     width: "100%",
@@ -1670,8 +2732,8 @@ const styles = StyleSheet.create({
   stageCard: {
     width: "100%",
     borderRadius: 28,
-    padding: 12,
-    gap: 10,
+    padding: 8,
+    gap: 8,
     borderWidth: 1,
     borderColor: "rgba(148, 163, 184, 0.18)",
     backgroundColor: "#0d1b2e",
@@ -1682,41 +2744,70 @@ const styles = StyleSheet.create({
     minWidth: 0,
     backgroundColor: "#0b1628",
     borderRadius: 18,
-    paddingVertical: 14,
-    paddingHorizontal: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: "rgba(148, 163, 184, 0.14)",
-    gap: 5,
-  },
-  openedStatCard: {
-    flex: 1.55,
+    gap: 3,
   },
   statLabel: {
     color: "#94a3b8",
-    fontSize: 12,
+    fontSize: 10,
     textTransform: "uppercase",
     letterSpacing: 0.8,
-  },
-  openedStatValuesRow: {
-    flexDirection: "row",
-    gap: 8,
   },
   statValueFrame: {
     flex: 1,
     minWidth: 0,
-    borderRadius: 14,
-    paddingVertical: 9,
-    paddingHorizontal: 10,
+    borderRadius: 11,
+    paddingVertical: 5,
+    paddingHorizontal: 6,
     backgroundColor: "rgba(19, 48, 77, 0.62)",
     borderWidth: 1,
     borderColor: "rgba(125, 211, 252, 0.15)",
     gap: 2,
   },
+  statValueRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
   statValue: {
     color: "#f8fafc",
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: "800",
     flexShrink: 1,
+    textAlign: "center",
+    fontVariant: ["tabular-nums"],
+  },
+  statActionButton: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0e7490",
+    borderWidth: 1,
+    borderColor: "#67e8f9",
+    shadowColor: "#67e8f9",
+    shadowOpacity: 0.34,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  statActionButtonDisabled: {
+    backgroundColor: "#162235",
+    borderColor: "rgba(100, 116, 139, 0.55)",
+    borderStyle: "dashed",
+    shadowOpacity: 0,
+  },
+  statActionButtonText: {
+    color: "#f8fafc",
+    fontSize: 18,
+    lineHeight: 20,
+    fontWeight: "900",
+  },
+  statActionButtonTextDisabled: {
+    color: "#64748b",
   },
   boardShell: {
     overflow: "hidden",
@@ -1762,6 +2853,11 @@ const styles = StyleSheet.create({
     color: "#cbd5e1",
     fontSize: 13,
     lineHeight: 18,
+  },
+  winCoinsText: {
+    color: "#fde047",
+    fontSize: 16,
+    fontWeight: "900",
   },
   overlayButton: {
     alignSelf: "flex-start",
@@ -1843,10 +2939,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(148, 163, 184, 0.18)",
   },
+  modalTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  modalHeaderRow: {
+    width: "100%",
+    flexDirection: "row",
+    justifyContent: "flex-end",
+  },
   modalTitle: {
     color: "#f8fafc",
     fontSize: 20,
     fontWeight: "800",
+    flex: 1,
   },
   modalBody: {
     gap: 8,
@@ -1898,6 +3006,14 @@ const styles = StyleSheet.create({
     gap: 14,
     borderWidth: 1,
     borderColor: "rgba(125, 211, 252, 0.18)",
+  },
+  introHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  introHeaderSpacer: {
+    flex: 1,
   },
   previewShell: {
     width: "100%",
