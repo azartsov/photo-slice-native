@@ -335,7 +335,7 @@ function splitHazard(hazard: Hazard, hazards: Hazard[]): Hazard[] {
         x: Math.cos(angle) * speed,
         y: Math.sin(angle) * speed,
       },
-      radius: hazard.radius * 0.84,
+      radius: hazard.radius,
       angle: hazard.angle + direction * 28,
       spin: hazard.spin * direction,
     };

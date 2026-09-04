@@ -267,7 +267,7 @@ const UI_TEXT = {
     nextLevelHint: "Следующий по кругу",
     currentRewardHint: "Тускнеют по ходу уровня",
     readyTitle: "Уровень готов",
-    readyBody: "Нажмите Играть, чтобы начать попытку. Монеты этого уровня будут постепенно гаснуть, пока идет прохождение.",
+    readyBody: "Нажмите Играть, чтобы начать попытку.",
     ok: "ОК",
     loading: "Загрузка...",
     needPhotosTitle: "Нужен доступ к фото",
@@ -278,17 +278,21 @@ const UI_TEXT = {
     libraryErrorBody: "Системный доступ к фото не ответил корректно.",
     helpTitle: "Как играть",
     helpLines: [
-      "1. Курсор сам бежит по периметру закрытой части.",
-      "2. Тап по полю запускает разрез внутрь фото.",
-      "3. Пока идёт разрез, каждый следующий тап поворачивает линию на 90° в сторону тапа.",
-      "4. Если шурикен касается линии, попытка отменяется и тратится жизнь.",
-      "5. Когда линия упирается в границу, открывается меньшая область.",
-      "6. Если шурикен оказался в открывшейся части, он уничтожается.",
-      "7. Уровни идут по кругу: Солнечный, Облачный, Штормовой, Ураганный и Апокалипсис.",
-      "8. На уровнях выдается от 1 до 5 монет. Чем дольше идет прохождение, тем больше монет темнеет.",
-      "9. После победы в копилку уходят только те монеты, которые не успели потемнеть.",
-      "10. Во время попытки кнопка + в разделе Жизни тратит 2 монеты из копилки и добавляет одну жизнь. Она доступна, когда в копилке есть хотя бы 2 монеты.",
+      "1. Тап по полю запускает разрез, следующие тапы поворачивают его на 90°.",
+      "2. Откройте область без шурикенов, чтобы уничтожить их. Контакт с линией отнимает жизнь.",
+      "3. Уровни повторяют пять уровней сложности, а номер уровня показывает общий прогресс.",
+      "4. За победу всегда дается 1 монета. Песочные часы показывают бонус за скорость: от +1 на первом уровне до +5 на пятом.",
+      "5. Когда песок закончился, бонус исчезает, но гарантированная монета остается.",
+      "6. Кнопка + у Жизней тратит 2 монеты из копилки и добавляет одну жизнь.",
     ],
+    difficultyLegendTitle: "Сложности",
+    difficultyDescriptions: {
+      sunny: "Солнечный: 3 шурикена",
+      cloudy: "Облачный: 4 шурикена",
+      stormy: "Штормовой: 5 шурикенов",
+      blizzard: "Ураганный: 6 шурикенов",
+      apocalypse: "Апокалипсис: 7 шурикенов",
+    },
     close: "Закрыть",
     settingsTitle: "Настройки",
     languageTitle: "Язык интерфейса",
@@ -333,7 +337,7 @@ const UI_TEXT = {
     nextLevelHint: "Next in loop",
     currentRewardHint: "Dims during the run",
     readyTitle: "Level ready",
-    readyBody: "Press Play to start the run. This level's coins will dim over time while you play.",
+    readyBody: "Press Play to start the run.",
     ok: "OK",
     loading: "Loading...",
     needPhotosTitle: "Photo access required",
@@ -344,17 +348,21 @@ const UI_TEXT = {
     libraryErrorBody: "The system media library request did not complete correctly.",
     helpTitle: "How to play",
     helpLines: [
-      "1. The cursor moves along the edge of the hidden area.",
-      "2. Tap the board to launch a cut into the photo.",
-      "3. While the cut is moving, each new tap turns it by 90 degrees toward the tap side.",
-      "4. If a shuriken touches the line, the attempt is canceled and you lose a life.",
-      "5. When the line reaches the border, the smaller area is revealed.",
-      "6. Any shuriken inside the revealed area is destroyed.",
-      "7. Levels loop automatically through Sunny, Cloudy, Stormy, Blizzard, and Apocalypse.",
-      "8. Each level gives 1 to 5 coins. The longer the run takes, the more coins fade out.",
-      "9. When you win, only the coins that stayed bright are added to your bank.",
-      "10. During a run, the + button in Lives spends 2 banked coins to add one life. It is available when the bank has at least 2 coins.",
+      "1. Tap the board to launch a cut; further taps turn it by 90 degrees.",
+      "2. Reveal an area without shurikens to clear them. A shuriken touching the cut costs a life.",
+      "3. Five difficulty levels repeat while the level number shows your overall progress.",
+      "4. Every win gives 1 coin. The hourglass shows a speed bonus, from +1 on level one to +5 on level five.",
+      "5. When the sand runs out, the bonus ends but the guaranteed coin remains.",
+      "6. The + button by Lives spends 2 banked coins to add one life.",
     ],
+    difficultyLegendTitle: "Difficulty levels",
+    difficultyDescriptions: {
+      sunny: "Sunny: 3 shurikens",
+      cloudy: "Cloudy: 4 shurikens",
+      stormy: "Stormy: 5 shurikens",
+      blizzard: "Blizzard: 6 shurikens",
+      apocalypse: "Apocalypse: 7 shurikens",
+    },
     close: "Close",
     settingsTitle: "Settings",
     languageTitle: "Interface language",
@@ -548,7 +556,7 @@ export function PhotoSliceGameScreen() {
         await setAudioModeAsync({
           playsInSilentMode: true,
           shouldPlayInBackground: false,
-          interruptionMode: "doNotMix",
+          interruptionMode: "mixWithOthers",
           shouldRouteThroughEarpiece: false,
         });
 
@@ -724,8 +732,10 @@ export function PhotoSliceGameScreen() {
   const hazardsLeft = gameState.hazards.length;
   const copy = UI_TEXT[language];
   const openedPhotosCount = openedPhotosByDifficulty[difficulty];
-  const coinVisualStates = getCoinVisualStates(levelReward, averageLevelDurationsMs[difficulty], openPercent, attemptStarted, gameState.status, rewardClockMs);
-  const currentLevelCoins = coinVisualStates.filter((coin) => coin.eclipseProgress < 1).length;
+  const currentLevelCoins = getVisibleBrightCoins(levelReward, averageLevelDurationsMs[difficulty], openPercent, attemptStarted, gameState.status);
+  const levelBonusCoins = Math.max(0, currentLevelCoins - 1);
+  const maxLevelBonusCoins = Math.max(0, levelReward.totalCoins - 1);
+  const sandProgress = getHourglassSandProgress(levelReward, averageLevelDurationsMs[difficulty], attemptStarted, gameState.status, rewardClockMs);
   const nextDifficulty = getNextDifficulty(difficulty);
   const canPressPlay = !loadingPhoto && !attemptStarted;
 
@@ -1307,36 +1317,17 @@ export function PhotoSliceGameScreen() {
             <View style={styles.levelBadge}>
               <Text style={styles.levelBadgeLabel}>{copy.level}</Text>
               <Text style={styles.levelBadgeValue}>{levelNumber}</Text>
-              <Text style={styles.levelBadgeCaption}>{getDifficultyLabel(difficulty, copy)}</Text>
+              <View style={styles.levelDifficultyIcon}>
+                <DifficultyWeatherIcon difficulty={difficulty} size={48} />
+              </View>
             </View>
             <View ref={totalCoinsBadgeRef} style={styles.totalCoinsBadge}>
               <Text style={styles.totalCoinsLabel}>{copy.totalCoins}</Text>
               <Animated.Text style={[styles.totalCoinsValue, { transform: [{ scale: totalCoinsScale }] }]}>{totalCoins}</Animated.Text>
-            </View>
-          </View>
-            <View ref={rewardCardRef} style={styles.rewardCard}>
-            <View style={styles.coinRow}>
-              {coinVisualStates.map((coin) => (
-                <View key={`${difficulty}-coin-${coin.index}`} style={[styles.coinTokenShell, coinRewardFlight ? styles.coinTokenSourceHidden : null]}>
-                  <LinearGradient
-                    colors={["#fff7b0", "#facc15", "#d97706"]}
-                    start={{ x: 0.18, y: 0.08 }}
-                    end={{ x: 0.82, y: 0.95 }}
-                    style={[styles.coinToken, styles.coinTokenBright]}
-                  >
-                    <View style={styles.coinTokenRim} />
-                    <View style={styles.coinTokenInnerRing} />
-                    <View style={styles.coinTokenShine} />
-                  </LinearGradient>
-                  <View
-                    style={[
-                      styles.coinTokenEclipse,
-                      styles.coinTokenDim,
-                      { width: Math.round(COIN_TOKEN_SIZE * coin.eclipseProgress) },
-                    ]}
-                  />
-                </View>
-              ))}
+              <View ref={rewardCardRef} style={styles.hourglassReward}>
+                <Hourglass sandProgress={sandProgress} running={attemptStarted && gameState.status === "playing"} />
+                <Text style={styles.hourglassBonusText}>+{levelBonusCoins}</Text>
+              </View>
             </View>
           </View>
         </View>
@@ -1492,6 +1483,15 @@ export function PhotoSliceGameScreen() {
             {line}
           </Text>
         ))}
+        <View style={styles.difficultyLegend}>
+          <Text style={styles.difficultyLegendTitle}>{copy.difficultyLegendTitle}</Text>
+          {DIFFICULTY_ORDER.map((difficultyLevel) => (
+            <View key={difficultyLevel} style={styles.difficultyLegendRow}>
+              <DifficultyWeatherIcon difficulty={difficultyLevel} size={36} />
+              <Text style={styles.difficultyLegendText}>{copy.difficultyDescriptions[difficultyLevel]}</Text>
+            </View>
+          ))}
+        </View>
       </OverlaySheet>
 
       <OverlaySheet
@@ -1602,7 +1602,6 @@ function DemoBackdrop() {
 
 function GameTitleMark({ title, variant }: { title: string; variant: "header" | "intro" }) {
   const isIntro = variant === "intro";
-  const firstOIndex = title.toLowerCase().indexOf("o");
 
   return (
     <View style={[styles.titleMark, isIntro ? styles.titleMarkIntro : styles.titleMarkHeader]}>
@@ -1611,33 +1610,9 @@ function GameTitleMark({ title, variant }: { title: string; variant: "header" | 
         accessible
         style={[styles.titleGlyphWrap, isIntro ? styles.titleGlyphWrapIntro : null]}
       >
-        {Array.from(title).map((character, index) =>
-          /^o$/i.test(character) && index === firstOIndex ? (
-            <Svg
-              key={`${character}-${index}`}
-              width={isIntro ? 28 : 17}
-              height={isIntro ? 28 : 17}
-              viewBox="0 0 40 40"
-              style={[styles.titleShuriken, isIntro ? styles.titleShurikenIntro : null]}
-            >
-              <Polygon
-                points={buildShurikenPoints({ x: 20, y: 20 }, 19)}
-                fill="#f97316"
-                stroke="#fff5ea"
-                strokeWidth={4}
-              />
-              <Circle cx={20} cy={20} r={5.3} fill="#fff8ef" />
-            </Svg>
-          ) : (
-            <Text
-              key={`${character}-${index}`}
-              numberOfLines={1}
-              style={[styles.titleGlyphText, isIntro ? styles.titleGlyphTextIntro : styles.titleGlyphTextHeader]}
-            >
-              {character}
-            </Text>
-          ),
-        )}
+        <Text numberOfLines={1} style={[styles.titleGlyphText, isIntro ? styles.titleGlyphTextIntro : styles.titleGlyphTextHeader]}>
+          {title}
+        </Text>
       </View>
     </View>
   );
@@ -1775,6 +1750,39 @@ function MusicToggleButton({ muted, onPress }: { muted: boolean; onPress: () => 
         {muted ? <View style={styles.musicToggleSlash} /> : null}
       </View>
     </Pressable>
+  );
+}
+
+function Hourglass({ sandProgress, running }: { sandProgress: number; running: boolean }) {
+  const flip = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    flip.setValue(0);
+    if (running) {
+      Animated.sequence([
+        Animated.timing(flip, { toValue: 1, duration: 260, easing: Easing.in(Easing.cubic), useNativeDriver: true }),
+        Animated.timing(flip, { toValue: 0, duration: 260, easing: Easing.out(Easing.back(1.4)), useNativeDriver: true }),
+      ]).start();
+    }
+  }, [flip, running]);
+
+  const rotation = flip.interpolate({ inputRange: [0, 1], outputRange: ["0deg", "90deg"] });
+  const upperSandProgress = 1 - sandProgress;
+  const upperSandTop = 15 - 11 * upperSandProgress;
+  const upperSandHalfWidth = 1 + 7 * upperSandProgress;
+  const lowerSandTop = 28 - 12 * sandProgress;
+  const lowerSandHalfWidth = 1 + 7 * sandProgress;
+
+  return (
+    <Animated.View style={[styles.hourglass, { transform: [{ rotate: rotation }] }]}>
+      <Svg width="34" height="42" viewBox="0 0 26 32">
+        <Polygon points="3,2 23,2 16.5,15.5 23,30 3,30 9.5,15.5" fill="#10233c" stroke="#fde68a" strokeWidth="2" strokeLinejoin="round" />
+        <Polygon points={`${13 - upperSandHalfWidth},${upperSandTop} ${13 + upperSandHalfWidth},${upperSandTop} 14.5,15 11.5,15`} fill="#facc15" opacity="0.92" />
+        <Polygon points={`${13 - lowerSandHalfWidth},${lowerSandTop} ${13 + lowerSandHalfWidth},${lowerSandTop} 21,28 5,28`} fill="#facc15" opacity="0.92" />
+        <Rect x="2" y="0" width="22" height="3" rx="1.5" fill="#fff5ea" />
+        <Rect x="2" y="29" width="22" height="3" rx="1.5" fill="#fff5ea" />
+      </Svg>
+    </Animated.View>
   );
 }
 
@@ -2106,19 +2114,41 @@ function ActionButton({
   );
 }
 
-function getDifficultyLabel(level: DifficultyLevel, copy: (typeof UI_TEXT)[Language]) {
-  switch (level) {
-    case "sunny":
-      return copy.difficultySunny;
-    case "cloudy":
-      return copy.difficultyCloudy;
-    case "stormy":
-      return copy.difficultyStormy;
-    case "blizzard":
-      return copy.difficultyBlizzard;
-    case "apocalypse":
-      return copy.difficultyApocalypse;
-  }
+function DifficultyWeatherIcon({ difficulty, size = 48 }: { difficulty: DifficultyLevel; size?: number }) {
+  const isDarkCloud = difficulty === "stormy" || difficulty === "blizzard" || difficulty === "apocalypse";
+  const cloudFill = isDarkCloud ? "#1e293b" : "#f8fafc";
+  const cloudStroke = isDarkCloud ? "#e2e8f0" : "#ffffff";
+  const rainColor = difficulty === "apocalypse" ? "#60a5fa" : "#38bdf8";
+
+  return (
+    <Svg width={size} height={size} viewBox="0 0 48 48">
+      {difficulty === "sunny" || difficulty === "cloudy" || difficulty === "stormy" ? (
+        <>
+          <Circle cx="18" cy="18" r="8" fill="#facc15" />
+          <Polygon points="18,4 20,10 16,10" fill="#fde68a" />
+          <Polygon points="32,18 26,20 26,16" fill="#fde68a" />
+          <Polygon points="18,32 20,26 16,26" fill="#fde68a" />
+          <Polygon points="4,18 10,20 10,16" fill="#fde68a" />
+        </>
+      ) : null}
+      {difficulty !== "sunny" ? (
+        <>
+          <Circle cx="18" cy="26" r="9" fill={cloudFill} stroke={cloudStroke} strokeWidth="1.5" />
+          <Circle cx="28" cy="22" r="11" fill={cloudFill} stroke={cloudStroke} strokeWidth="1.5" />
+          <Circle cx="36" cy="28" r="7" fill={cloudFill} stroke={cloudStroke} strokeWidth="1.5" />
+          <Rect x="10" y="26" width="33" height="9" rx="4.5" fill={cloudFill} stroke={cloudStroke} strokeWidth="1.5" />
+        </>
+      ) : null}
+      {difficulty === "blizzard" || difficulty === "apocalypse" ? (
+        <>
+          <Rect x="16" y="37" width="3" height="8" rx="1.5" fill={rainColor} transform="rotate(18 17.5 41)" />
+          <Rect x="27" y="37" width="3" height="8" rx="1.5" fill={rainColor} transform="rotate(18 28.5 41)" />
+          <Rect x="37" y="37" width="3" height="8" rx="1.5" fill={rainColor} transform="rotate(18 38.5 41)" />
+        </>
+      ) : null}
+      {difficulty === "apocalypse" ? <Polygon points="25,35 19,44 25,44 22,48 33,38 27,38 30,35" fill="#facc15" /> : null}
+    </Svg>
+  );
 }
 
 function getNextDifficulty(level: DifficultyLevel) {
@@ -2158,16 +2188,16 @@ function getHazardKindsForLevel(levelNumber: number, hazardCount: number): Hazar
 function getHazardColors(kind: HazardKind) {
   switch (kind) {
     case "red":
-      return { fill: "#ef4444", stroke: "#fee2e2", center: "#fff1f2" };
+      return { fill: "#ff1744", stroke: "#fff1f2", center: "#ffffff" };
     case "green":
-      return { fill: "#22c55e", stroke: "#dcfce7", center: "#f0fdf4" };
+      return { fill: "#00e676", stroke: "#d1fae5", center: "#ffffff" };
     default:
       return { fill: "#f97316", stroke: "#fff5ea", center: "#fff8ef" };
   }
 }
 
 function getLevelCoinCount(level: DifficultyLevel) {
-  return DIFFICULTY_ORDER.indexOf(level) + 1;
+  return DIFFICULTY_ORDER.indexOf(level) + 2;
 }
 
 function mergeAverageDurations(partial?: Partial<AverageLevelDurationsMs>): AverageLevelDurationsMs {
@@ -2218,8 +2248,24 @@ function getVisibleBrightCoins(
 
   const elapsedMs = Math.max(0, Date.now() - reward.startedAtMs);
   const targetDurationMs = getCoinFadeDurationMs(reward.baselineDurationMs || averageDurationMs);
-  const fadeIntervalMs = Math.max(2400, targetDurationMs / reward.totalCoins);
-  return Math.max(0, reward.totalCoins - Math.floor(elapsedMs / fadeIntervalMs));
+  const bonusCoins = Math.max(0, reward.totalCoins - 1);
+  const fadeIntervalMs = Math.max(2400, targetDurationMs / Math.max(bonusCoins, 1));
+  return 1 + Math.max(0, bonusCoins - Math.floor(elapsedMs / fadeIntervalMs));
+}
+
+function getHourglassSandProgress(
+  reward: LevelRewardState,
+  averageDurationMs: number,
+  attemptStarted: boolean,
+  status: PhotoSliceGameState["status"],
+  nowMs: number,
+) {
+  if (!attemptStarted || status !== "playing" || reward.startedAtMs == null) {
+    return 0;
+  }
+
+  const targetDurationMs = getCoinFadeDurationMs(reward.baselineDurationMs || averageDurationMs);
+  return Math.min(1, Math.max(0, (nowMs - reward.startedAtMs) / targetDurationMs));
 }
 
 function getCoinEclipseProgresses(
@@ -2505,9 +2551,11 @@ const styles = StyleSheet.create({
   levelBadge: {
     flex: 1.2,
     minWidth: 0,
+    minHeight: 78,
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 14,
+    position: "relative",
     backgroundColor: "#0b1628",
     borderWidth: 1,
     borderColor: "rgba(249, 115, 22, 0.26)",
@@ -2524,10 +2572,10 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "900",
   },
-  levelBadgeCaption: {
-    color: "#fdba74",
-    fontSize: 13,
-    fontWeight: "700",
+  levelDifficultyIcon: {
+    position: "absolute",
+    right: 10,
+    bottom: 8,
   },
   totalCoinsBadge: {
     flex: 1,
@@ -2538,8 +2586,8 @@ const styles = StyleSheet.create({
     backgroundColor: "#111d12",
     borderWidth: 1,
     borderColor: "rgba(250, 204, 21, 0.26)",
-    justifyContent: "center",
-    gap: 4,
+    justifyContent: "flex-start",
+    gap: 2,
   },
   totalCoinsLabel: {
     color: "#94a3b8",
@@ -2551,6 +2599,26 @@ const styles = StyleSheet.create({
     color: "#fde047",
     fontSize: 28,
     fontWeight: "900",
+  },
+  hourglassReward: {
+    position: "absolute",
+    right: 8,
+    bottom: 5,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 3,
+  },
+  hourglass: {
+    width: 34,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  hourglassBonusText: {
+    color: "#fde68a",
+    fontSize: 13,
+    fontWeight: "900",
+    fontVariant: ["tabular-nums"],
   },
   rewardCard: {
     marginTop: 10,
@@ -2657,28 +2725,24 @@ const styles = StyleSheet.create({
     width: "auto",
     justifyContent: "center",
   },
-  titleShuriken: {
-    marginHorizontal: 1,
-  },
-  titleShurikenIntro: {
-    marginHorizontal: 3,
-  },
   titleGlyphText: {
     color: "#fb923c",
-    fontWeight: "900",
-    letterSpacing: 0,
+    fontFamily: "cursive",
+    fontWeight: "300",
+    fontStyle: "italic",
+    letterSpacing: 0.4,
     includeFontPadding: false,
-    textShadowColor: "#fff5ea",
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 1,
+    textShadowColor: "rgba(255, 245, 234, 0.48)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   titleGlyphTextHeader: {
-    fontSize: 19,
-    lineHeight: 22,
+    fontSize: 23,
+    lineHeight: 26,
   },
   titleGlyphTextIntro: {
-    fontSize: 32,
-    lineHeight: 36,
+    fontSize: 38,
+    lineHeight: 42,
   },
   iconButton: {
     width: 36,
@@ -3028,6 +3092,27 @@ const styles = StyleSheet.create({
   },
   helpLine: {
     color: "#d8e1eb",
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  difficultyLegend: {
+    gap: 6,
+    paddingTop: 4,
+  },
+  difficultyLegendTitle: {
+    color: "#f8fafc",
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  difficultyLegendRow: {
+    minHeight: 30,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  difficultyLegendText: {
+    color: "#d8e1eb",
+    flexShrink: 1,
     fontSize: 13,
     lineHeight: 18,
   },
