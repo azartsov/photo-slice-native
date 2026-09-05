@@ -456,6 +456,7 @@ export function PhotoSliceGameScreen() {
   const attemptedInitialPhotoRef = useRef(false);
   const eventNonceRef = useRef(0);
   const burstIdRef = useRef(1);
+  const skipNextAreaOpenSoundRef = useRef(false);
   const previousStatusRef = useRef(gameState.status);
   const previousOpenPercentRef = useRef<number | null>(null);
   const previousOpenedPhotosCountRef = useRef<number | null>(null);
@@ -844,7 +845,11 @@ export function PhotoSliceGameScreen() {
 
     if (openPercent > previousOpenPercentRef.current) {
       triggerOpenedFeedback("opened-progress", Math.max(1, openPercent - previousOpenPercentRef.current));
-      queueSound("paper-rustle");
+      if (skipNextAreaOpenSoundRef.current) {
+        skipNextAreaOpenSoundRef.current = false;
+      } else {
+        queueSound("paper-rustle");
+      }
     }
 
     previousOpenPercentRef.current = openPercent;
@@ -1198,6 +1203,7 @@ export function PhotoSliceGameScreen() {
       Vibration.vibrate([0, 44, 26, 52, 24, 68]);
       playLifeLostSoundImmediate();
     } else {
+      skipNextAreaOpenSoundRef.current = true;
       queueSound("hazard-clear");
       pulseCounter(targetScale);
     }
