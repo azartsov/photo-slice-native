@@ -2644,9 +2644,9 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   levelBadge: {
-    flex: 1.2,
+    flex: 1,
     minWidth: 0,
-    minHeight: 78,
+    height: 78,
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -2675,6 +2675,7 @@ const styles = StyleSheet.create({
   totalCoinsBadge: {
     flex: 1,
     minWidth: 0,
+    height: 78,
     borderRadius: 18,
     paddingVertical: 12,
     paddingHorizontal: 14,
@@ -2698,7 +2699,7 @@ const styles = StyleSheet.create({
   hourglassReward: {
     position: "absolute",
     right: 8,
-    bottom: 5,
+    top: 18,
     flexDirection: "row",
     alignItems: "center",
     gap: 3,
