@@ -1,7 +1,7 @@
 import { type RefObject, useEffect, useMemo, useRef, useState } from "react";
 
 import { Directory, File, Paths } from "expo-file-system";
-import { setAudioModeAsync, setIsAudioActiveAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
+import { createAudioPlayer, setAudioModeAsync, setIsAudioActiveAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { LinearGradient } from "expo-linear-gradient";
 import * as MediaLibrary from "expo-media-library";
 import { StatusBar } from "expo-status-bar";
@@ -19,7 +19,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
-import Svg, { Circle, G, Polygon, Polyline, Rect } from "react-native-svg";
+import Svg, { Circle, G, Line, Polygon, Polyline, Rect } from "react-native-svg";
 
 import {
   advanceGameState,
@@ -129,6 +129,7 @@ type AppStats = {
   musicMuted?: boolean;
   totalCoins?: number;
   averageLevelDurationsMs?: Partial<AverageLevelDurationsMs>;
+  levelNumber?: number;
 };
 
 const MAX_FRAME_DELTA_SECONDS = 0.1;
@@ -141,8 +142,15 @@ const CAMERA_ALBUM_PATTERN = /(camera|камера|dcim)/i;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".gif", ".bmp"]);
 const APP_STORAGE_DIRECTORY = new Directory(Paths.document, "random-photo-slice");
 const APP_STATS_FILE = new File(APP_STORAGE_DIRECTORY, "stats.json");
+const PAPER_RUSTLE_SOUND = require("../../assets/sfx/paper-rustle.wav");
 const INTRO_MUSIC_TRACK = require("../../assets/audio/intro.m4a");
-const GAME_MUSIC_TRACKS = [require("../../assets/audio/1.m4a"), require("../../assets/audio/2.m4a")] as const;
+const GAME_MUSIC_TRACKS = [
+  require("../../assets/audio/1.m4a"),
+  require("../../assets/audio/2.m4a"),
+  require("../../assets/audio/3.m4a"),
+  require("../../assets/audio/4.m4a"),
+  require("../../assets/audio/5.m4a"),
+] as const;
 const DEFAULT_SOURCE_ENTRIES: SourceEntry[] = [
   { id: "camera", kind: "camera" },
 ];
@@ -230,24 +238,35 @@ async function primeAudioPlayer(player: {
 async function restartSoundEffectPlayer(player: {
   muted: boolean;
   playing: boolean;
-  currentTime: number;
   pause(): void;
   play(): void;
   seekTo(seconds: number): Promise<void>;
 }) {
   player.muted = false;
 
-  const shouldSeekToStart = player.playing || player.currentTime > 0;
-
   if (player.playing) {
     player.pause();
   }
 
-  if (shouldSeekToStart) {
-    await player.seekTo(0);
-  }
+  await player.seekTo(0);
+  await waitForMilliseconds(30);
 
   player.play();
+}
+
+async function playPaperRustleSound() {
+  const player = createAudioPlayer(PAPER_RUSTLE_SOUND);
+  player.volume = 0.48;
+
+  try {
+    await waitForAudioPlayerLoaded(player, 1200);
+    player.play();
+    await waitForMilliseconds(Math.max(650, Math.ceil(player.duration * 1000) + 120));
+  } catch (error) {
+    console.warn("paper rustle playback failed", error);
+  } finally {
+    player.remove();
+  }
 }
 const UI_TEXT = {
   ru: {
@@ -437,7 +456,6 @@ export function PhotoSliceGameScreen() {
   const attemptedInitialPhotoRef = useRef(false);
   const eventNonceRef = useRef(0);
   const burstIdRef = useRef(1);
-  const suppressNextOpenedSoundRef = useRef(false);
   const previousStatusRef = useRef(gameState.status);
   const previousOpenPercentRef = useRef<number | null>(null);
   const previousOpenedPhotosCountRef = useRef<number | null>(null);
@@ -451,14 +469,12 @@ export function PhotoSliceGameScreen() {
   const currentHazardPlayerIndexRef = useRef(0);
   const currentLifeLostPlayerIndexRef = useRef(0);
   const currentGameTrackIndexRef = useRef(0);
-  const paperRustlePlayer = useAudioPlayer(require("../../assets/sfx/paper-rustle.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const hazardClearPlayerA = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const hazardClearPlayerB = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const lifeLostPlayerA = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const lifeLostPlayerB = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const introMusicPlayer = useAudioPlayer(INTRO_MUSIC_TRACK, { downloadFirst: true, keepAudioSessionActive: true });
   const gameMusicPlayer = useAudioPlayer(GAME_MUSIC_TRACKS[0], { downloadFirst: true, keepAudioSessionActive: true });
-  const paperRustleStatus = useAudioPlayerStatus(paperRustlePlayer);
   const hazardClearStatusA = useAudioPlayerStatus(hazardClearPlayerA);
   const hazardClearStatusB = useAudioPlayerStatus(hazardClearPlayerB);
   const lifeLostStatusA = useAudioPlayerStatus(lifeLostPlayerA);
@@ -473,8 +489,6 @@ export function PhotoSliceGameScreen() {
   const difficultyTheme = DIFFICULTY_THEMES[difficulty];
 
   useEffect(() => {
-    paperRustlePlayer.muted = false;
-    paperRustlePlayer.volume = 0.72;
     hazardClearPlayerA.muted = false;
     hazardClearPlayerA.volume = 0.5;
     hazardClearPlayerB.muted = false;
@@ -487,13 +501,12 @@ export function PhotoSliceGameScreen() {
     introMusicPlayer.loop = true;
     gameMusicPlayer.volume = 0.48;
     gameMusicPlayer.loop = false;
-  }, [gameMusicPlayer, hazardClearPlayerA, hazardClearPlayerB, introMusicPlayer, lifeLostPlayerA, lifeLostPlayerB, paperRustlePlayer]);
+  }, [gameMusicPlayer, hazardClearPlayerA, hazardClearPlayerB, introMusicPlayer, lifeLostPlayerA, lifeLostPlayerB]);
 
   useEffect(() => {
     if (
       audioPrimedRef.current ||
       !audioSessionReady ||
-      !paperRustleStatus.isLoaded ||
       !hazardClearStatusA.isLoaded ||
       !hazardClearStatusB.isLoaded ||
       !lifeLostStatusA.isLoaded ||
@@ -504,7 +517,6 @@ export function PhotoSliceGameScreen() {
 
     audioPrimedRef.current = true;
     void (async () => {
-      await primeAudioPlayer(paperRustlePlayer, paperRustleStatus.duration);
       await primeAudioPlayer(hazardClearPlayerA, hazardClearStatusA.duration);
       await primeAudioPlayer(hazardClearPlayerB, hazardClearStatusB.duration);
       await primeAudioPlayer(lifeLostPlayerA, lifeLostStatusA.duration);
@@ -530,9 +542,6 @@ export function PhotoSliceGameScreen() {
     lifeLostStatusA.isLoaded,
     lifeLostStatusB.duration,
     lifeLostStatusB.isLoaded,
-    paperRustlePlayer,
-    paperRustleStatus.duration,
-    paperRustleStatus.isLoaded,
   ]);
 
   useEffect(() => {
@@ -546,7 +555,7 @@ export function PhotoSliceGameScreen() {
     for (const effect of pendingEffects) {
       queueSound(effect);
     }
-  }, [audioReady, hazardClearStatusA.isLoaded, hazardClearStatusB.isLoaded, lifeLostStatusA.isLoaded, lifeLostStatusB.isLoaded, paperRustleStatus.isLoaded]);
+  }, [audioReady, hazardClearStatusA.isLoaded, hazardClearStatusB.isLoaded, lifeLostStatusA.isLoaded, lifeLostStatusB.isLoaded]);
 
   useEffect(() => {
     let cancelled = false;
@@ -556,7 +565,7 @@ export function PhotoSliceGameScreen() {
         await setAudioModeAsync({
           playsInSilentMode: true,
           shouldPlayInBackground: false,
-          interruptionMode: "mixWithOthers",
+          interruptionMode: "duckOthers",
           shouldRouteThroughEarpiece: false,
         });
 
@@ -835,12 +844,7 @@ export function PhotoSliceGameScreen() {
 
     if (openPercent > previousOpenPercentRef.current) {
       triggerOpenedFeedback("opened-progress", Math.max(1, openPercent - previousOpenPercentRef.current));
-
-      if (suppressNextOpenedSoundRef.current) {
-        suppressNextOpenedSoundRef.current = false;
-      } else {
-        queueSound("paper-rustle");
-      }
+      queueSound("paper-rustle");
     }
 
     previousOpenPercentRef.current = openPercent;
@@ -878,6 +882,15 @@ export function PhotoSliceGameScreen() {
       setMusicMuted(parsed.musicMuted ?? false);
       setTotalCoins(parsed.totalCoins ?? 0);
       setAverageLevelDurationsMs(mergeAverageDurations(parsed.averageLevelDurationsMs));
+
+      const savedLevelNumber = parsed.levelNumber;
+      if (typeof savedLevelNumber === "number" && Number.isInteger(savedLevelNumber) && savedLevelNumber >= 1) {
+        const savedDifficulty = getDifficultyForLevel(savedLevelNumber);
+        setDifficulty(savedDifficulty);
+        setLevelNumber(savedLevelNumber);
+        setGameState(createGameStateForLevel(savedDifficulty, savedLevelNumber));
+        setLevelReward(createLevelRewardState(savedDifficulty, mergeAverageDurations(parsed.averageLevelDurationsMs)));
+      }
 
       if (parsed.openedPhotosByDifficulty) {
         setOpenedPhotosByDifficulty({
@@ -921,6 +934,7 @@ export function PhotoSliceGameScreen() {
     nextMusicMuted: boolean,
     nextTotalCoins: number,
     nextAverageDurations: AverageLevelDurationsMs,
+    nextLevelNumber = levelNumber,
   ) {
     try {
       if (!APP_STORAGE_DIRECTORY.exists) {
@@ -937,6 +951,7 @@ export function PhotoSliceGameScreen() {
           musicMuted: nextMusicMuted,
           totalCoins: nextTotalCoins,
           averageLevelDurationsMs: nextAverageDurations,
+          levelNumber: nextLevelNumber,
         }),
       );
     } catch (error) {
@@ -1103,6 +1118,7 @@ export function PhotoSliceGameScreen() {
       const upcomingLevelNumber = levelNumber + 1;
       setDifficulty(upcomingDifficulty);
       setLevelNumber(upcomingLevelNumber);
+      await persistAppStats(openedPhotosByDifficulty, musicMuted, totalCoins, averageLevelDurationsMs, upcomingLevelNumber);
       await handleRandomPhoto(true, upcomingDifficulty, upcomingLevelNumber);
       return;
     }
@@ -1124,21 +1140,14 @@ export function PhotoSliceGameScreen() {
       return;
     }
 
-    const nextHazardPlayerIndex = currentHazardPlayerIndexRef.current;
-    const player =
-      effect === "paper-rustle"
-        ? paperRustlePlayer
-        : nextHazardPlayerIndex === 0
-          ? hazardClearPlayerA
-          : hazardClearPlayerB;
-    const isLoaded =
-      effect === "paper-rustle"
-        ? paperRustleStatus.isLoaded
-        : nextHazardPlayerIndex === 0
-          ? hazardClearStatusA.isLoaded
-          : hazardClearStatusB.isLoaded;
+    if (effect === "paper-rustle") {
+      void playPaperRustleSound();
+      return;
+    }
 
-    if (!isLoaded) {
+    const nextHazardPlayerIndex = currentHazardPlayerIndexRef.current;
+    const player = nextHazardPlayerIndex === 0 ? hazardClearPlayerA : hazardClearPlayerB;
+    if (!player.isLoaded) {
       pendingSoundQueueRef.current.push(effect);
       return;
     }
@@ -1161,9 +1170,8 @@ export function PhotoSliceGameScreen() {
   function playLifeLostSoundImmediate() {
     const nextLifeLostPlayerIndex = currentLifeLostPlayerIndexRef.current;
     const player = nextLifeLostPlayerIndex === 0 ? lifeLostPlayerA : lifeLostPlayerB;
-    const isLoaded = nextLifeLostPlayerIndex === 0 ? lifeLostStatusA.isLoaded : lifeLostStatusB.isLoaded;
 
-    if (!audioReady || !isLoaded) {
+    if (!audioReady || !player.isLoaded) {
       pendingSoundQueueRef.current.push("life-lost");
       return;
     }
@@ -1190,7 +1198,6 @@ export function PhotoSliceGameScreen() {
       Vibration.vibrate([0, 44, 26, 52, 24, 68]);
       playLifeLostSoundImmediate();
     } else {
-      suppressNextOpenedSoundRef.current = true;
       queueSound("hazard-clear");
       pulseCounter(targetScale);
     }
@@ -1770,8 +1777,8 @@ function Hourglass({ sandProgress, running }: { sandProgress: number; running: b
   const upperSandProgress = 1 - sandProgress;
   const upperSandTop = 15 - 11 * upperSandProgress;
   const upperSandHalfWidth = 1 + 7 * upperSandProgress;
-  const lowerSandTop = 28 - 12 * sandProgress;
-  const lowerSandHalfWidth = 1 + 7 * sandProgress;
+  const lowerSandTop = 28 - 12.5 * sandProgress;
+  const lowerSandHalfWidth = 8 - 6.5 * sandProgress;
 
   return (
     <Animated.View style={[styles.hourglass, { transform: [{ rotate: rotation }] }]}>
@@ -2125,10 +2132,14 @@ function DifficultyWeatherIcon({ difficulty, size = 48 }: { difficulty: Difficul
       {difficulty === "sunny" || difficulty === "cloudy" || difficulty === "stormy" ? (
         <>
           <Circle cx="18" cy="18" r="8" fill="#facc15" />
-          <Polygon points="18,4 20,10 16,10" fill="#fde68a" />
-          <Polygon points="32,18 26,20 26,16" fill="#fde68a" />
-          <Polygon points="18,32 20,26 16,26" fill="#fde68a" />
-          <Polygon points="4,18 10,20 10,16" fill="#fde68a" />
+          <Line x1="18" y1="3" x2="18" y2="7" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="28.6" y1="7.4" x2="25.8" y2="10.2" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="33" y1="18" x2="29" y2="18" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="28.6" y1="28.6" x2="25.8" y2="25.8" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="18" y1="33" x2="18" y2="29" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="7.4" y1="28.6" x2="10.2" y2="25.8" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="3" y1="18" x2="7" y2="18" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
+          <Line x1="7.4" y1="7.4" x2="10.2" y2="10.2" stroke="#fde68a" strokeWidth="3" strokeLinecap="round" />
         </>
       ) : null}
       {difficulty !== "sunny" ? (
@@ -2154,6 +2165,10 @@ function DifficultyWeatherIcon({ difficulty, size = 48 }: { difficulty: Difficul
 function getNextDifficulty(level: DifficultyLevel) {
   const currentIndex = DIFFICULTY_ORDER.indexOf(level);
   return DIFFICULTY_ORDER[(currentIndex + 1) % DIFFICULTY_ORDER.length];
+}
+
+function getDifficultyForLevel(levelNumber: number) {
+  return DIFFICULTY_ORDER[(levelNumber - 1) % DIFFICULTY_ORDER.length];
 }
 
 function createGameStateForLevel(level: DifficultyLevel, levelNumber: number) {
