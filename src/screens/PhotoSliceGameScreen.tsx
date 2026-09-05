@@ -114,6 +114,7 @@ type CoinSpendFlight = {
   source: Vector2;
   target: Vector2;
   finalTotalCoins: number;
+  purchase: "life" | "hazard";
 };
 
 type NoticeState = {
@@ -137,12 +138,14 @@ const MIN_LEVEL_DURATION_MS = 9000;
 const MAX_LEVEL_DURATION_MS = 270000;
 const COIN_FADE_DURATION_MULTIPLIER = 3;
 const COIN_TOKEN_SIZE = 28;
-const LIFE_COST_COINS = 2;
+const LIFE_COST_COINS = 5;
+const HAZARD_REMOVAL_COST_COINS = 5;
 const CAMERA_ALBUM_PATTERN = /(camera|камера|dcim)/i;
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".gif", ".bmp"]);
 const APP_STORAGE_DIRECTORY = new Directory(Paths.document, "random-photo-slice");
 const APP_STATS_FILE = new File(APP_STORAGE_DIRECTORY, "stats.json");
 const PAPER_RUSTLE_SOUND = require("../../assets/sfx/paper-rustle.wav");
+const HAZARD_CLEAR_SOUND = require("../../assets/sfx/hazard-clear.wav");
 const INTRO_MUSIC_TRACK = require("../../assets/audio/intro.m4a");
 const GAME_MUSIC_TRACKS = [
   require("../../assets/audio/1.m4a"),
@@ -254,16 +257,16 @@ async function restartSoundEffectPlayer(player: {
   player.play();
 }
 
-async function playPaperRustleSound() {
-  const player = createAudioPlayer(PAPER_RUSTLE_SOUND);
-  player.volume = 0.48;
+async function playOneShotSound(source: number, volume: number) {
+  const player = createAudioPlayer(source);
+  player.volume = volume;
 
   try {
     await waitForAudioPlayerLoaded(player, 1200);
     player.play();
     await waitForMilliseconds(Math.max(650, Math.ceil(player.duration * 1000) + 120));
   } catch (error) {
-    console.warn("paper rustle playback failed", error);
+    console.warn("one-shot sound playback failed", error);
   } finally {
     player.remove();
   }
@@ -278,6 +281,8 @@ const UI_TEXT = {
     opened: "Открыто",
     hazards: "Враги",
     lives: "Жизни",
+    buyLifeAccessibilityLabel: "Добавить жизнь за пять монет",
+    removeHazardAccessibilityLabel: "Убрать врага за пять монет",
     wonTitle: "Фото полностью раскрыто",
     wonBody: "Все шурикены уничтожены. Оставшиеся яркие монеты ушли в копилку, а следующий уровень уже станет сложнее.",
     lostTitle: "Фото не удалось открыть",
@@ -297,14 +302,18 @@ const UI_TEXT = {
     libraryErrorBody: "Системный доступ к фото не ответил корректно.",
     helpTitle: "Как играть",
     helpLines: [
-      "1. Тап по полю запускает разрез, следующие тапы поворачивают его на 90°.",
-      "2. Откройте область без шурикенов, чтобы уничтожить их. Контакт с линией отнимает жизнь.",
-      "3. Уровни повторяют пять уровней сложности, а номер уровня показывает общий прогресс.",
-      "4. За победу всегда дается 1 монета. Песочные часы показывают бонус за скорость: от +1 на первом уровне до +5 на пятом.",
-      "5. Когда песок закончился, бонус исчезает, но гарантированная монета остается.",
-      "6. Кнопка + у Жизней тратит 2 монеты из копилки и добавляет одну жизнь.",
+      "1. Тап запускает разрез, следующий тап поворачивает его.",
+      "2. Открывайте области без шурикенов. Контакт с линией отнимает жизнь.",
+      "3. Победа дает 1 монету и бонус за скорость до +5.",
+      "4. + Жизни и - Враги стоят по 5 монет.",
     ],
     difficultyLegendTitle: "Сложности",
+    shurikenLegendTitle: "Типы шурикенов",
+    shurikenDescriptions: {
+      normal: "Обычный: отнимает жизнь.",
+      red: "Красный: распадается на два обычных.",
+      green: "Зеленый: распадается на два красных.",
+    },
     difficultyDescriptions: {
       sunny: "Солнечный: 3 шурикена",
       cloudy: "Облачный: 4 шурикена",
@@ -348,6 +357,8 @@ const UI_TEXT = {
     opened: "Opened",
     hazards: "Enemies",
     lives: "Lives",
+    buyLifeAccessibilityLabel: "Add a life for five coins",
+    removeHazardAccessibilityLabel: "Remove an enemy for five coins",
     wonTitle: "Photo fully revealed",
     wonBody: "All shurikens are gone. The bright coins were banked and the next level is already tougher.",
     lostTitle: "Photo could not be revealed",
@@ -367,14 +378,18 @@ const UI_TEXT = {
     libraryErrorBody: "The system media library request did not complete correctly.",
     helpTitle: "How to play",
     helpLines: [
-      "1. Tap the board to launch a cut; further taps turn it by 90 degrees.",
-      "2. Reveal an area without shurikens to clear them. A shuriken touching the cut costs a life.",
-      "3. Five difficulty levels repeat while the level number shows your overall progress.",
-      "4. Every win gives 1 coin. The hourglass shows a speed bonus, from +1 on level one to +5 on level five.",
-      "5. When the sand runs out, the bonus ends but the guaranteed coin remains.",
-      "6. The + button by Lives spends 2 banked coins to add one life.",
+      "1. Tap to start a cut; tap again to turn it.",
+      "2. Reveal areas without shurikens. Touching a cut costs a life.",
+      "3. A win gives 1 coin and up to +5 speed bonus coins.",
+      "4. + Lives and - Enemies cost 5 coins each.",
     ],
     difficultyLegendTitle: "Difficulty levels",
+    shurikenLegendTitle: "Shuriken types",
+    shurikenDescriptions: {
+      normal: "Normal: costs a life.",
+      red: "Red: splits into two Normal shurikens.",
+      green: "Green: splits into two Red shurikens.",
+    },
     difficultyDescriptions: {
       sunny: "Sunny: 3 shurikens",
       cloudy: "Cloudy: 4 shurikens",
@@ -451,6 +466,7 @@ export function PhotoSliceGameScreen() {
   const boardShellRef = useRef<View | null>(null);
   const rewardCardRef = useRef<View | null>(null);
   const totalCoinsBadgeRef = useRef<View | null>(null);
+  const hazardsCardRef = useRef<View | null>(null);
   const livesCardRef = useRef<View | null>(null);
   const lastFrameRef = useRef<number | null>(null);
   const attemptedInitialPhotoRef = useRef(false);
@@ -467,17 +483,12 @@ export function PhotoSliceGameScreen() {
     "life-lost": Promise.resolve(),
   });
   const audioPrimedRef = useRef(false);
-  const currentHazardPlayerIndexRef = useRef(0);
   const currentLifeLostPlayerIndexRef = useRef(0);
   const currentGameTrackIndexRef = useRef(0);
-  const hazardClearPlayerA = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
-  const hazardClearPlayerB = useAudioPlayer(require("../../assets/sfx/hazard-clear.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const lifeLostPlayerA = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const lifeLostPlayerB = useAudioPlayer(require("../../assets/sfx/life-lost-electric.wav"), { downloadFirst: true, keepAudioSessionActive: true });
   const introMusicPlayer = useAudioPlayer(INTRO_MUSIC_TRACK, { downloadFirst: true, keepAudioSessionActive: true });
   const gameMusicPlayer = useAudioPlayer(GAME_MUSIC_TRACKS[0], { downloadFirst: true, keepAudioSessionActive: true });
-  const hazardClearStatusA = useAudioPlayerStatus(hazardClearPlayerA);
-  const hazardClearStatusB = useAudioPlayerStatus(hazardClearPlayerB);
   const lifeLostStatusA = useAudioPlayerStatus(lifeLostPlayerA);
   const lifeLostStatusB = useAudioPlayerStatus(lifeLostPlayerB);
   const introMusicStatus = useAudioPlayerStatus(introMusicPlayer);
@@ -490,10 +501,6 @@ export function PhotoSliceGameScreen() {
   const difficultyTheme = DIFFICULTY_THEMES[difficulty];
 
   useEffect(() => {
-    hazardClearPlayerA.muted = false;
-    hazardClearPlayerA.volume = 0.5;
-    hazardClearPlayerB.muted = false;
-    hazardClearPlayerB.volume = 0.5;
     lifeLostPlayerA.muted = false;
     lifeLostPlayerA.volume = 0.74;
     lifeLostPlayerB.muted = false;
@@ -502,14 +509,12 @@ export function PhotoSliceGameScreen() {
     introMusicPlayer.loop = true;
     gameMusicPlayer.volume = 0.48;
     gameMusicPlayer.loop = false;
-  }, [gameMusicPlayer, hazardClearPlayerA, hazardClearPlayerB, introMusicPlayer, lifeLostPlayerA, lifeLostPlayerB]);
+  }, [gameMusicPlayer, introMusicPlayer, lifeLostPlayerA, lifeLostPlayerB]);
 
   useEffect(() => {
     if (
       audioPrimedRef.current ||
       !audioSessionReady ||
-      !hazardClearStatusA.isLoaded ||
-      !hazardClearStatusB.isLoaded ||
       !lifeLostStatusA.isLoaded ||
       !lifeLostStatusB.isLoaded
     ) {
@@ -518,8 +523,6 @@ export function PhotoSliceGameScreen() {
 
     audioPrimedRef.current = true;
     void (async () => {
-      await primeAudioPlayer(hazardClearPlayerA, hazardClearStatusA.duration);
-      await primeAudioPlayer(hazardClearPlayerB, hazardClearStatusB.duration);
       await primeAudioPlayer(lifeLostPlayerA, lifeLostStatusA.duration);
       await primeAudioPlayer(lifeLostPlayerB, lifeLostStatusB.duration);
     })()
@@ -531,12 +534,6 @@ export function PhotoSliceGameScreen() {
       });
   }, [
     audioSessionReady,
-    hazardClearPlayerA,
-    hazardClearPlayerB,
-    hazardClearStatusA.duration,
-    hazardClearStatusA.isLoaded,
-    hazardClearStatusB.duration,
-    hazardClearStatusB.isLoaded,
     lifeLostPlayerA,
     lifeLostPlayerB,
     lifeLostStatusA.duration,
@@ -556,7 +553,7 @@ export function PhotoSliceGameScreen() {
     for (const effect of pendingEffects) {
       queueSound(effect);
     }
-  }, [audioReady, hazardClearStatusA.isLoaded, hazardClearStatusB.isLoaded, lifeLostStatusA.isLoaded, lifeLostStatusB.isLoaded]);
+  }, [audioReady, lifeLostStatusA.isLoaded, lifeLostStatusB.isLoaded]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1000,6 +997,52 @@ export function PhotoSliceGameScreen() {
           source: { x: sourceX + sourceWidth / 2, y: sourceY + sourceHeight / 2 },
           target: { x: targetX + targetWidth / 2, y: targetY + targetHeight / 2 },
           finalTotalCoins: nextTotalCoins,
+          purchase: "life",
+        });
+      });
+    });
+  }
+
+  function removeHazard() {
+    if (totalCoins < HAZARD_REMOVAL_COST_COINS || gameState.status !== "playing" || gameState.hazards.length <= 1 || coinSpendFlight) {
+      return;
+    }
+
+    const nextTotalCoins = totalCoins - HAZARD_REMOVAL_COST_COINS;
+    const applyHazardRemoval = () => {
+      setGameState((current) => {
+        if (current.status !== "playing" || current.hazards.length <= 1) {
+          return current;
+        }
+
+        const removedIndex = Math.floor(Math.random() * current.hazards.length);
+        return { ...current, hazards: current.hazards.filter((_, index) => index !== removedIndex) };
+      });
+    };
+
+    if (!totalCoinsBadgeRef.current || !hazardsCardRef.current) {
+      setTotalCoins(nextTotalCoins);
+      applyHazardRemoval();
+      void persistAppStats(openedPhotosByDifficulty, musicMuted, nextTotalCoins, averageLevelDurationsMs);
+      return;
+    }
+
+    totalCoinsBadgeRef.current.measureInWindow((sourceX, sourceY, sourceWidth, sourceHeight) => {
+      hazardsCardRef.current?.measureInWindow((targetX, targetY, targetWidth, targetHeight) => {
+        if (!sourceWidth || !sourceHeight || !targetWidth || !targetHeight) {
+          setTotalCoins(nextTotalCoins);
+          applyHazardRemoval();
+          void persistAppStats(openedPhotosByDifficulty, musicMuted, nextTotalCoins, averageLevelDurationsMs);
+          return;
+        }
+
+        setCoinSpendFlight({
+          id: Date.now(),
+          count: HAZARD_REMOVAL_COST_COINS,
+          source: { x: sourceX + sourceWidth / 2, y: sourceY + sourceHeight / 2 },
+          target: { x: targetX + targetWidth / 2, y: targetY + targetHeight / 2 },
+          finalTotalCoins: nextTotalCoins,
+          purchase: "hazard",
         });
       });
     });
@@ -1146,30 +1189,11 @@ export function PhotoSliceGameScreen() {
     }
 
     if (effect === "paper-rustle") {
-      void playPaperRustleSound();
+      void playOneShotSound(PAPER_RUSTLE_SOUND, 0.48);
       return;
     }
 
-    const nextHazardPlayerIndex = currentHazardPlayerIndexRef.current;
-    const player = nextHazardPlayerIndex === 0 ? hazardClearPlayerA : hazardClearPlayerB;
-    if (!player.isLoaded) {
-      pendingSoundQueueRef.current.push(effect);
-      return;
-    }
-
-    if (effect === "hazard-clear") {
-      currentHazardPlayerIndexRef.current = nextHazardPlayerIndex === 0 ? 1 : 0;
-    }
-
-    soundReplayTasksRef.current[effect] = soundReplayTasksRef.current[effect]
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          await restartSoundEffectPlayer(player);
-        } catch (error) {
-          console.warn("sound playback failed", error);
-        }
-      });
+    void playOneShotSound(HAZARD_CLEAR_SOUND, 0.5);
   }
 
   function playLifeLostSoundImmediate() {
@@ -1356,7 +1380,18 @@ export function PhotoSliceGameScreen() {
                 accentColor="#67e8f9"
                 allowValueResize={false}
               />
-              <StatCard label={copy.hazards} value={String(hazardsLeft)} scale={hazardsScale} onLayout={captureLayout(setHazardsLayout)} accentColor="#fde047" />
+              <StatCard
+                targetRef={hazardsCardRef}
+                label={copy.hazards}
+                value={String(hazardsLeft)}
+                scale={hazardsScale}
+                onLayout={captureLayout(setHazardsLayout)}
+                accentColor="#fde047"
+                actionLabel="-"
+                actionAccessibilityLabel={copy.removeHazardAccessibilityLabel}
+                actionDisabled={totalCoins < HAZARD_REMOVAL_COST_COINS || gameState.status !== "playing" || hazardsLeft <= 1 || Boolean(coinSpendFlight)}
+                onAction={removeHazard}
+              />
               <StatCard
                 targetRef={livesCardRef}
                 label={copy.lives}
@@ -1365,6 +1400,7 @@ export function PhotoSliceGameScreen() {
                 onLayout={captureLayout(setLivesLayout)}
                 accentColor="#67e8f9"
                 actionLabel="+"
+                actionAccessibilityLabel={copy.buyLifeAccessibilityLabel}
                 actionDisabled={totalCoins < LIFE_COST_COINS || gameState.status !== "playing" || Boolean(coinSpendFlight)}
                 onAction={buyLife}
               />
@@ -1476,8 +1512,20 @@ export function PhotoSliceGameScreen() {
           onComplete={() => {
             setTotalCoins((current) => current - coinSpendFlight.count);
             pulseCounter(totalCoinsScale);
-            setGameState((current) => (current.status === "playing" ? { ...current, lives: current.lives + 1 } : current));
-            pulseCounter(livesScale);
+            if (coinSpendFlight.purchase === "life") {
+              setGameState((current) => (current.status === "playing" ? { ...current, lives: current.lives + 1 } : current));
+              pulseCounter(livesScale);
+            } else {
+              setGameState((current) => {
+                if (current.status !== "playing" || current.hazards.length <= 1) {
+                  return current;
+                }
+
+                const removedIndex = Math.floor(Math.random() * current.hazards.length);
+                return { ...current, hazards: current.hazards.filter((_, index) => index !== removedIndex) };
+              });
+              pulseCounter(hazardsScale);
+            }
             void persistAppStats(openedPhotosByDifficulty, musicMuted, coinSpendFlight.finalTotalCoins, averageLevelDurationsMs);
             setCoinSpendFlight(null);
           }}
@@ -1491,20 +1539,31 @@ export function PhotoSliceGameScreen() {
         closeLabel={copy.close}
         extraAction={<MusicToggleButton muted={musicMuted} onPress={toggleMusicMuted} />}
       >
-        {copy.helpLines.map((line) => (
-          <Text key={line} style={styles.helpLine}>
-            {line}
-          </Text>
-        ))}
-        <View style={styles.difficultyLegend}>
-          <Text style={styles.difficultyLegendTitle}>{copy.difficultyLegendTitle}</Text>
-          {DIFFICULTY_ORDER.map((difficultyLevel) => (
-            <View key={difficultyLevel} style={styles.difficultyLegendRow}>
-              <DifficultyWeatherIcon difficulty={difficultyLevel} size={36} />
-              <Text style={styles.difficultyLegendText}>{copy.difficultyDescriptions[difficultyLevel]}</Text>
+          <ScrollView style={styles.helpScroll} contentContainerStyle={styles.helpScrollContent} showsVerticalScrollIndicator={false}>
+            {copy.helpLines.map((line) => (
+              <Text key={line} style={styles.helpLine}>
+                {line}
+              </Text>
+            ))}
+            <View style={styles.difficultyLegend}>
+              <Text style={styles.difficultyLegendTitle}>{copy.difficultyLegendTitle}</Text>
+              {DIFFICULTY_ORDER.map((difficultyLevel) => (
+                <View key={difficultyLevel} style={styles.difficultyLegendRow}>
+                  <DifficultyWeatherIcon difficulty={difficultyLevel} size={36} />
+                  <Text style={styles.difficultyLegendText}>{copy.difficultyDescriptions[difficultyLevel]}</Text>
+                </View>
+              ))}
             </View>
-          ))}
-        </View>
+            <View style={styles.shurikenLegend}>
+              <Text style={styles.difficultyLegendTitle}>{copy.shurikenLegendTitle}</Text>
+              {(["normal", "red", "green"] as HazardKind[]).map((kind) => (
+                <View key={kind} style={styles.shurikenLegendRow}>
+                  <HazardLegendIcon kind={kind} />
+                  <Text style={styles.difficultyLegendText}>{copy.shurikenDescriptions[kind]}</Text>
+                </View>
+              ))}
+            </View>
+          </ScrollView>
       </OverlaySheet>
 
       <OverlaySheet
@@ -1808,6 +1867,7 @@ function StatCard({
   accentColor,
   allowValueResize = true,
   actionLabel,
+  actionAccessibilityLabel,
   actionDisabled = false,
   onAction,
 }: {
@@ -1819,6 +1879,7 @@ function StatCard({
   accentColor?: string;
   allowValueResize?: boolean;
   actionLabel?: string;
+  actionAccessibilityLabel?: string;
   actionDisabled?: boolean;
   onAction?: () => void;
 }) {
@@ -1839,7 +1900,7 @@ function StatCard({
         </View>
         {actionLabel && onAction ? (
           <Pressable
-            accessibilityLabel="Add a life for two coins"
+            accessibilityLabel={actionAccessibilityLabel ?? actionLabel}
             disabled={actionDisabled}
             hitSlop={6}
             onPress={(event) => {
@@ -2164,6 +2225,19 @@ function DifficultyWeatherIcon({ difficulty, size = 48 }: { difficulty: Difficul
         </>
       ) : null}
       {difficulty === "apocalypse" ? <Polygon points="25,35 19,44 25,44 22,48 33,38 27,38 30,35" fill="#facc15" /> : null}
+    </Svg>
+  );
+}
+
+function HazardLegendIcon({ kind }: { kind: HazardKind }) {
+  const colors = getHazardColors(kind);
+
+  return (
+    <Svg width="36" height="36" viewBox="0 0 100 100">
+      <G rotation="18" origin="50, 50">
+        <Polygon points={buildShurikenPoints({ x: 50, y: 50 }, 31)} fill={colors.fill} stroke={colors.stroke} strokeWidth="5" />
+        <Circle cx="50" cy="50" r="9" fill={colors.center} />
+      </G>
     </Svg>
   );
 }
@@ -3116,6 +3190,12 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
   },
+  helpScroll: {
+    maxHeight: 510,
+  },
+  helpScrollContent: {
+    gap: 8,
+  },
   difficultyLegend: {
     gap: 6,
     paddingTop: 4,
@@ -3136,6 +3216,16 @@ const styles = StyleSheet.create({
     flexShrink: 1,
     fontSize: 13,
     lineHeight: 18,
+  },
+  shurikenLegend: {
+    gap: 6,
+    paddingTop: 6,
+  },
+  shurikenLegendRow: {
+    minHeight: 36,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
   },
   settingSection: {
     gap: 8,
